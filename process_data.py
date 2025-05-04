@@ -112,6 +112,29 @@ def load_match_moves(match_id: str, moves_dir: Path) -> List[dict]:
         return []
 
 
+def load_match_stats(match_id: str, stats_dir: Path) -> dict | None:
+    """Loads and parses the aggregated match stats JSON data."""
+    if not match_id or not isinstance(match_id, str) or len(match_id) < 5:
+        logger.debug("Skipping load_match_stats for invalid match_id: %s", match_id)
+        return None
+
+    json_filepath = stats_dir / f"{match_id}.json"
+    if not json_filepath.exists():
+        logger.warning("Aggregated Match Stats JSON file not found: %s", json_filepath)
+        return None
+
+    try:
+        with open(json_filepath, "r", encoding="utf-8") as f:
+            stats_data = json.load(f)
+            return stats_data
+    except json.JSONDecodeError:
+        logger.warning("Could not decode Match Stats JSON: %s", json_filepath)
+        return None
+    except Exception as e:
+        logger.error("Error reading Match Stats JSON file %s: %s", json_filepath, e)
+        return None
+
+
 ################################################################################
 # Core calculator                                                               #
 ################################################################################
@@ -137,152 +160,206 @@ class StatsCalculator:
     # ------------------------------------------------------------------
 
     def process(
-        self, schedule: pd.DataFrame, all_moves: Dict[str, Sequence[dict]]
+        self, schedule: pd.DataFrame, all_moves: Dict[str, Sequence[dict]], 
+        all_stats: Dict[str, dict] # Add match stats data
     ) -> None:
         """Iterate schedule rows & their events to populate aggregates."""
         # Iterate using iterrows() to reliably access columns by name
-        for index, row_series in schedule.iterrows():
-            # Access columns directly from the row Series using lowercase names
-            match_id = str(row_series.get("match_id", ""))
-            local_id = str(row_series.get('local_team_id', ""))
-            visitor_id = str(row_series.get('visitor_team_id', ""))
-            
-            # --- Debug row --- 
-            # print(f"DEBUG: Checking row - Match: {match_id}, Local: {local_id}, Visitor: {visitor_id}, Target: {self.team_id}")
-            # --- End Debug row ---
+        processed_matches = 0
+        skipped_matches_no_moves = 0
+        skipped_matches_no_stats = 0
+        skipped_matches_id_mapping = 0
 
-            # Skip if Match ID is missing (e.g., NaN row)
+        for index, row_series in schedule.iterrows():
+            match_id = str(row_series.get("match_id", ""))
             if not match_id:
+                continue # Skip rows without match ID
+
+            events = all_moves.get(match_id)
+            stats_data = all_stats.get(match_id)
+
+            if not events:
+                # log.debug("No moves data found for match %s, skipping.", match_id)
+                skipped_matches_no_moves += 1
                 continue
-                
-            events = all_moves.get(match_id, [])
-            if events:
-                # Pass the row Series directly to the processing function
-                self._process_single_game(match_id, row_series, events)
+            if not stats_data:
+                # log.debug("No stats data found for match %s, skipping ID mapping.", match_id)
+                skipped_matches_no_stats += 1
+                continue
+            
+            # Pass the stats data to the processing function
+            mapped = self._process_single_game(match_id, row_series, events, stats_data)
+            if mapped:
+                processed_matches += 1
+            else:
+                skipped_matches_id_mapping += 1
+        
+        logger.info("Processing complete. Total matches in schedule: %d", len(schedule))
+        logger.info("Successfully processed stats for %d matches.", processed_matches)
+        if skipped_matches_no_moves > 0:
+            logger.warning("Skipped %d matches due to missing moves JSON.", skipped_matches_no_moves)
+        if skipped_matches_no_stats > 0:
+            logger.warning("Skipped %d matches due to missing stats JSON.", skipped_matches_no_stats)
+        if skipped_matches_id_mapping > 0:
+            logger.warning("Skipped %d matches due to failed team ID mapping (check stats JSON).", skipped_matches_id_mapping)
 
     # ------------------------------------------------------------------
     # Private helpers – one game
     # ------------------------------------------------------------------
 
     def _process_single_game(
-        self, match_id: str, row_series: pd.Series, events: Sequence[dict]
-    ) -> None:
+        self, match_id: str, row_series: pd.Series, events: Sequence[dict],
+        stats_data: dict # Add stats data
+    ) -> bool: # Return True if processed, False if skipped due to mapping
         """Core loop; translates original long logic into smaller steps."""
-        # Get team name corresponding to the target team ID from the schedule row Series
-        target_team_name = None
-        local_id = str(row_series.get('local_team_id', ''))
-        visitor_id = str(row_series.get('visitor_team_id', ''))
         
-        if local_id == self.team_id:
-            target_team_name = row_series.get('local_team')
-        elif visitor_id == self.team_id:
-            target_team_name = row_series.get('visitor_team')
+        target_team_schedule_id = self.team_id # ID from the schedule CSV (e.g., '69630')
+        match_stats_teams = stats_data.get("teams", [])
+        internal_id = None # Internal ID used in moves/stats JSON (e.g., 319033)
+        target_team_name = "Unknown"
 
-        if not target_team_name:
-            logger.debug("Target team %s not involved in match %s", self.team_id, match_id)
-            return # Skip game if our team isn't in it
+        # Find internal_id using the mapping in match_stats_teams
+        for team_info in match_stats_teams:
+            if str(team_info.get("teamIdExtern")) == target_team_schedule_id:
+                internal_id = team_info.get("teamIdIntern")
+                target_team_name = team_info.get("name", target_team_name)
+                break
 
-        # Detect internal idTeam by matching the *name* from a teamAction event
-        internal_id = next((
-            ev["idTeam"]
-            for ev in events
-            if ev.get("teamAction") and ev.get("actorName") == target_team_name
-        ), None)
-        
         if internal_id is None:
-            logger.warning(
-                "Skipping match %s for team '%s' – cannot map to internal idTeam", 
-                match_id, target_team_name
+            logger.debug(
+                "Skipping match %s for schedule team ID %s – Cannot map to internal idTeam using match_stats data.",
+                match_id, target_team_schedule_id
             )
-            return
+            return False # Indicate mapping failure
         else:
-            logger.info("Processing match %s for team '%s' (Internal ID: %s)", match_id, target_team_name, internal_id)
+            logger.debug("Mapped schedule team %s (%s) to internal ID %s for match %s", 
+                         target_team_schedule_id, target_team_name, internal_id, match_id)
 
-        on_court: set[str] = set()
-        player_state: Dict[str, dict] = {}
-        last_abs_sec = 0
+        # --- The rest of the processing logic remains largely the same ---
+        # ... (Initialize player_state, on_court, current_period_start_sec etc.)
+        player_state: Dict[str, Dict] = {}
+        on_court: Set[str] = set()
+        current_period_start_sec = 0.0
+        last_event_abs_seconds = 0.0
+        game_end_sec = 0.0 
+        last_processed_period = 0
 
-        def flush_pairwise(duration: float) -> None:
-            """Credit *duration* seconds to every pair currently on court."""
-            if duration <= 0 or len(on_court) < 2:
-                return
-            for p1 in on_court:
-                for p2 in on_court:
-                    self.pairwise_secs[p1][p2] += duration
+        for event in events:
+            event_type = event.get("move", "")
+            period = event.get("period", 0)
+            minute = event.get("minute", 0)
+            second = event.get("second", 0)
+            actor_id = event.get("actorId")
+            actor_name = event.get("actorName", "")
+            actor_num = event.get("actorShirtNumber")
+            event_team_id = event.get("idTeam")
+            is_target_team_event = (event_team_id == internal_id)
 
-        # chronological loop
-        for ev in sorted(events, key=lambda e: e.get("timestamp", "")):
-            if ev.get("idTeam") != internal_id:
-                continue
+            # Calculate absolute time in seconds for the event
+            if period > last_processed_period:
+                # Estimate period start time (assuming 10 min periods)
+                # This might be inaccurate if overtime exists or periods have different lengths
+                # A better approach would be to get actual period start/end times if available
+                current_period_start_sec = last_event_abs_seconds # Or base on previous period end
+                last_processed_period = period
+                # Reset game clock time for the new period? Assuming minute resets to 0? 
+                # The data shows minute continues across periods (e.g. minute 15 is in period 2)
+                # We need to be careful how absolute time is calculated. 
+                # Simplest: assume 10 min (600s) per period before the current one.
+                current_period_start_sec = (period - 1) * 600.0 
 
-            # time
-            period, mm, ss = ev.get("period"), ev.get("min"), ev.get("sec")
-            if not all(isinstance(x, int) for x in (period, mm, ss)):
-                continue
-            abs_sec = get_absolute_seconds(period, mm, ss)
-            flush_pairwise(abs_sec - last_abs_sec)
-            last_abs_sec = abs_sec
+            # event_abs_seconds = current_period_start_sec + (minute * 60.0) + second
+            # Recalculate absolute seconds based on period * duration - remaining time
+            # Assumes period duration is 10 mins (600s)
+            # Time remaining in period = (10 - minute) * 60 - second
+            # Time elapsed in game = (period-1)*600 + (600 - time_remaining) 
+            # Simplified: elapsed = (period-1)*600 + minute*60 + second (This seems correct based on data)
+            event_abs_seconds = ((period - 1) * 600.0) + (minute * 60.0) + second
+            last_event_abs_seconds = event_abs_seconds
+            game_end_sec = max(game_end_sec, event_abs_seconds) # Keep track of game end time
 
-            actor = ev.get("actorName")
-            if not actor or ev.get("teamAction"):
-                continue
+            if is_target_team_event and actor_name:
+                # Ensure player is in our main tracker
+                if actor_name not in self.players:
+                    self.players[actor_name] = PlayerAggregate(number=actor_num)
+                elif self.players[actor_name].number is None and actor_num is not None:
+                     self.players[actor_name].number = actor_num # Fill in number if missing
+                
+                pa = self.players[actor_name]
+                st = player_state.setdefault(
+                    actor_name,
+                    {"status": "out", "since": 0.0, "number": actor_num}
+                )
 
-            # ---- Store Player Number ----
-            if actor not in self.players or self.players[actor].number == "??":
-                num = ev.get('actorShirtNumber')
-                if num is not None:
-                    self.players[actor].number = str(num) # Store as string
-            # ---- End Store Player Number ----
-
-            # starters inference
-            if actor not in player_state and len(on_court) < 5:
-                player_state[actor] = {"status": "in", "since": (period - 1) * PERIOD_LENGTH_SEC}
-                on_court.add(actor)
-
-            move = ev.get("move", "")
-
-            # substitutions
-            if move == "Entra al camp":
-                player_state[actor] = {"status": "in", "since": abs_sec}
-                on_court.add(actor)
-                continue
-            if move == "Surt del camp" and player_state.get(actor, {}).get("status") == "in":
-                played = abs_sec - player_state[actor]["since"]
-                self._credit_minutes(actor, played)
-                player_state[actor]["status"] = "out"
-                on_court.discard(actor)
-                continue
-
-            # boxscore
-            pts = self.points_map.get(move, 0)
-            if pts:
-                self.team_pts += pts
-                pa = self.players[actor]
-                pa.pts += pts
-                if pts == 3:
+                # --- Handle Player Stats --- 
+                if event_type in ["Cistella de 3", "Triple"]:
                     pa.t3 += 1
-                elif pts == 2:
+                    pa.pts += 3
+                elif event_type in ["Cistella de 2", "Esmaixada"]:
                     pa.t2 += 1
-                else:
+                    pa.pts += 2
+                elif event_type == "Tir lliure convertit": # Free Throw Made
                     pa.t1 += 1
+                    pa.pts += 1
+                elif event_type == "Falta Personal":
+                    pa.fouls += 1
+                # Add other event types if needed (rebounds, assists, etc.)
 
-            if any(k in move for k in self.foul_keywords):
-                self.team_fouls += 1
-                self.players[actor].fouls += 1
+                # --- Handle Minutes Played & Pairwise --- 
+                if event_type == "Entra al camp":
+                    if st["status"] == "out":
+                        st["status"] = "in"
+                        st["since"] = event_abs_seconds
+                        # Update pairwise for newly entered player
+                        for other_player in on_court:
+                            self._credit_pairwise_secs(actor_name, other_player, 0)
+                        on_court.add(actor_name)
+                elif event_type == "Surt del camp":
+                    if st["status"] == "in":
+                        duration = event_abs_seconds - st["since"]
+                        self._credit_minutes(actor_name, duration)
+                        # Credit pairwise time for player leaving
+                        on_court.remove(actor_name)
+                        for other_player in on_court:
+                             self._credit_pairwise_secs(actor_name, other_player, duration)
+                        st["status"] = "out"
+                        st["since"] = event_abs_seconds
 
-        # end of game
-        game_end_sec = PERIOD_LENGTH_SEC * 4
-        flush_pairwise(game_end_sec - last_abs_sec)
+        # --- End of Game Processing --- 
+        # Credit remaining time for players still on court
         for p, st in player_state.items():
             if st["status"] == "in":
-                self._credit_minutes(p, game_end_sec - st["since"])
+                duration = game_end_sec - st["since"]
+                self._credit_minutes(p, duration)
+                # Credit remaining pairwise time
+                temp_on_court = on_court.copy()
+                temp_on_court.remove(p)
+                for other_player in temp_on_court:
+                     self._credit_pairwise_secs(p, other_player, duration)
+
+        # Increment GP for players who participated in this game
+        if player_state: # Only increment if the target team played and had events
+            for player_name in player_state: 
+                self.players[player_name].gp += 1
+        
+        return True # Indicate successful processing
 
     # ------------------------------------------------------------------
 
     def _credit_minutes(self, player: str, secs: float) -> None:
         pa = self.players[player]
         pa.merge_secs(secs)
-        pa.gp += 1  # crude GP increment
+        # pa.gp += 1  # Move GP increment to end of game processing
+
+    def _credit_pairwise_secs(self, p1: str, p2: str, secs: float) -> None:
+        """Adds played time to the pairwise matrix (for p1<->p2)."""
+        # Ensure order doesn't matter (store under alphabetically first name)
+        # Although defaultdict handles this, explicit check might be clearer
+        # if p1 > p2:
+        #     p1, p2 = p2, p1 # Swap to ensure consistency
+        self.pairwise_secs[p1][p2] += secs
+        if p1 != p2: # Avoid double-counting self-time
+             self.pairwise_secs[p2][p1] += secs
 
     # ------------------------------------------------------------------
     # Public accessors
@@ -351,59 +428,131 @@ def main() -> None:
     parser.add_argument(
         "--data-dir", default="data", help="Root data folder (CSV & JSON)"
     )
+    parser.add_argument("--match", default=None, help="Optional: Process only a single match ID")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     moves_dir = data_dir / "match_moves"
+    stats_dir = data_dir / "match_stats" # Directory for aggregated stats
 
-    for gid in args.groups:
-        print(f"\n{'='*15} Processing Group: {gid} | Team: {args.team} {'='*15}")
-        csv_path = data_dir / f"results_{gid}.csv"
-        try:
-            schedule_df = load_schedule(csv_path)
-        except FileNotFoundError:
-            logger.error("Schedule file not found for group %s at %s. Skipping group.", gid, csv_path)
-            continue
-        except ValueError as e:
-            logger.error("Error loading schedule for group %s: %s. Skipping group.", gid, e)
-            continue
-            
-        # Load moves only for the current group's matches
-        current_group_moves: Dict[str, List[dict]] = {}
-        match_ids_in_group = schedule_df["match_id"].dropna().astype(str).unique()
-        logger.info("Found %d unique match IDs in schedule for group %s", len(match_ids_in_group), gid)
-        for mid in match_ids_in_group:
-            moves_data = load_match_moves(mid, moves_dir)
-            if moves_data: # Only add if moves were successfully loaded
-                 current_group_moves[mid] = moves_data
-            # No need for setdefault as we start with an empty dict each time
+    if args.match:
+        # --- Process Single Match --- 
+        logger.info(f"Processing single match ID: {args.match} for Team ID: {args.team}")
+        match_found_in_schedule = False
+        schedule_df_single = None
+        moves_single = None
+        stats_single = None
 
-        if not current_group_moves:
-             logger.warning("No valid match moves data loaded for group %s. Cannot calculate stats.", gid)
-             continue
-             
-        # Instantiate calculator for *this group*
-        calc = StatsCalculator(args.team)
-        # Process only this group's data
-        calc.process(schedule_df, current_group_moves)
+        for gid in args.groups:
+            csv_path = data_dir / f"results_{gid}.csv"
+            if not csv_path.exists():
+                logger.warning("Schedule file %s not found, skipping group.", csv_path)
+                continue
+            try:
+                schedule_df_group = load_schedule(csv_path)
+                # Check if the match ID exists in this group's schedule
+                match_row = schedule_df_group[schedule_df_group['match_id'] == args.match]
+                if not match_row.empty:
+                    logger.info(f"Match {args.match} found in group {gid} schedule.")
+                    schedule_df_single = match_row
+                    moves_single = load_match_moves(args.match, moves_dir)
+                    stats_single = load_match_stats(args.match, stats_dir) # Load stats for the single match
+                    match_found_in_schedule = True
+                    break # Found the match, no need to check other groups
+            except FileNotFoundError:
+                logger.error("Schedule file not found (should not happen after check): %s", csv_path)
+            except ValueError as e:
+                logger.error("Error loading schedule %s: %s", csv_path, e)
+            except Exception as e:
+                 logger.error("Unexpected error processing schedule %s: %s", csv_path, e)
 
-        print("\n---- Player aggregate ----")
-        player_table = calc.player_table()
-        if not player_table.empty:
-            print(player_table.to_string(index=False))
-        else:
-            print("(No data found for this team in this group)")
-
-        print("\n---- Pairwise minutes (first 10×10) ----")
-        pair_df = calc.pairwise_minutes()
-        if not pair_df.empty:
-            # Limit to max 10x10 for display
-            max_dim = min(10, pair_df.shape[0], pair_df.shape[1])
-            print(pair_df.iloc[:max_dim, :max_dim].to_string(float_format='{:d}'.format))
-        else:
-             print("(No data found for this team in this group)")
+        if not match_found_in_schedule:
+            logger.error(f"Match ID {args.match} not found in any specified group's schedule.")
+            return
         
-        print(f"{'='*15} Finished Group: {gid} {'='*15}")
+        if not moves_single:
+            logger.error(f"Match moves data not found or failed to load for match {args.match}.")
+            # Optionally continue if only stats are needed, but core calculation depends on moves
+            return 
+        if not stats_single:
+            logger.error(f"Match stats data not found or failed to load for match {args.match}. Required for team ID mapping.")
+            return
+
+        calc = StatsCalculator(args.team)
+        # Pass the single match data as dictionaries keyed by the match ID
+        calc.process(schedule_df_single, {args.match: moves_single}, {args.match: stats_single})
+
+        # Display results for the single match
+        print_results(calc)
+
+    else:
+        # --- Process Multiple Groups (original logic, but adapted) ---
+        all_schedule_frames: list[pd.DataFrame] = []
+        all_moves_data: Dict[str, List[dict]] = {}
+        all_stats_data: Dict[str, dict] = {} # Store loaded match stats
+
+        for gid in args.groups:
+            print(f"\n{'='*15} Loading Group: {gid} {'='*15}")
+            csv_path = data_dir / f"results_{gid}.csv"
+            try:
+                schedule_df = load_schedule(csv_path)
+                all_schedule_frames.append(schedule_df)
+                # Pre-load moves and stats for all matches in this schedule
+                for mid in schedule_df["match_id"].dropna().astype(str).unique():
+                    if mid not in all_moves_data:
+                         loaded_moves = load_match_moves(mid, moves_dir)
+                         if loaded_moves:
+                             all_moves_data.setdefault(mid, loaded_moves)
+                    if mid not in all_stats_data:
+                        loaded_stats = load_match_stats(mid, stats_dir) # Load stats
+                        if loaded_stats:
+                            all_stats_data.setdefault(mid, loaded_stats)
+
+            except FileNotFoundError:
+                logger.error("Schedule file not found: %s", csv_path)
+                continue # Skip to next group if schedule is missing
+            except ValueError as e:
+                logger.error("Error loading schedule %s: %s", csv_path, e)
+                continue
+            except Exception as e:
+                 logger.error("Unexpected error processing schedule %s: %s", csv_path, e)
+                 continue
+        
+        if not all_schedule_frames:
+            logger.error("No schedule data loaded successfully. Exiting.")
+            return
+
+        # Combine all loaded schedule data
+        combined_schedule_df = pd.concat(all_schedule_frames, ignore_index=True)
+
+        print(f"\n{'='*15} Processing All Loaded Data | Team: {args.team} {'='*15}")
+        calc = StatsCalculator(args.team)
+        calc.process(combined_schedule_df, all_moves_data, all_stats_data) # Pass stats data
+
+        # Display results for the combined data
+        print_results(calc)
+
+def print_results(calc: 'StatsCalculator'):
+    """Helper function to print the standard output tables."""
+    if not calc.players:
+        print("\n(No data found for this team in the processed match(es))")
+        return
+
+    print("\n==== Player Aggregates ====")
+    player_df = calc.player_table()
+    if not player_df.empty:
+        print(player_df.to_string(index=False))
+    else:
+        print("(No data found for this team in the processed match(es))")
+
+    print("\n==== Pairwise minutes (first 10×10) ====")
+    pair_df = calc.pairwise_minutes()
+    if not pair_df.empty:
+        # Limit to max 10x10 for display
+        max_dim = min(10, pair_df.shape[0], pair_df.shape[1])
+        print(pair_df.iloc[:max_dim, :max_dim].to_string(float_format='{:d}'.format))
+    else:
+        print("(No data found for this team in the processed match(es))")
 
 
 if __name__ == "__main__":
