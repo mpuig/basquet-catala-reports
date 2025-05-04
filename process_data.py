@@ -22,7 +22,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence, Set
+from typing import Dict, List, Sequence, Set, Any
 
 import pandas as pd
 
@@ -176,6 +176,11 @@ class StatsCalculator:
         self.on_pts_a: Dict[str, int] = defaultdict(int)      # points against while ON
         self.team_pts_f: int = 0                              # total points for (team)
         self.team_pts_a: int = 0                              # total points against
+        # --- Evolution & lineup tracking ---
+        self.game_log: List[dict] = []  # one row per player per game
+        self.lineup_stats: Dict[tuple, Dict[str, Any]] = defaultdict(lambda: {'secs': 0.0,
+                                                                              'pts_for': 0,
+                                                                              'pts_against': 0})
 
     # ------------------------------------------------------------------
     # Public API
@@ -258,6 +263,10 @@ class StatsCalculator:
                          target_team_schedule_id, target_team_name, internal_id, match_id)
 
         # --- The rest of the processing logic remains largely the same ---
+        # ---- per‑game accumulators ------------------------------------------------
+        per_game_minutes: Dict[str, float] = defaultdict(float)
+        per_game_points: Dict[str, int] = defaultdict(int)
+        last_lineup_tuple: tuple | None = None
         # ... (Initialize player_state, on_court, current_period_start_sec etc.)
         player_state: Dict[str, Dict] = {}
         on_court: Set[str] = set()
@@ -288,23 +297,40 @@ class StatsCalculator:
                 # The data shows minute continues across periods (e.g. minute 15 is in period 2)
                 # We need to be careful how absolute time is calculated. 
                 # Simplest: assume 10 min (600s) per period before the current one.
-                current_period_start_sec = (period - 1) * 600.0 
+                # current_period_start_sec = (period - 1) * 600.0 
 
-            # event_abs_seconds = current_period_start_sec + (minute * 60.0) + second
-            # Recalculate absolute seconds based on period * duration - remaining time
-            # Assumes period duration is 10 mins (600s)
-            # Time remaining in period = (10 - minute) * 60 - second
-            # Time elapsed in game = (period-1)*600 + (600 - time_remaining) 
-            # Simplified: elapsed = (period-1)*600 + minute*60 + second (This seems correct based on data)
-            event_abs_seconds = ((period - 1) * 600.0) + (minute * 60.0) + second
+                # event_abs_seconds = current_period_start_sec + (minute * 60.0) + second
+                # Recalculate absolute seconds based on period * duration - remaining time
+                # Assumes period duration is 10 mins (600s)
+                # Time remaining in period = (10 - minute) * 60 - second
+                # Time elapsed in game = (period-1)*600 + (600 - time_remaining) 
+                # Simplified: elapsed = (period-1)*600 + minute*60 + second (This seems correct based on data)
+                # event_abs_seconds = ((period - 1) * 600.0) + (minute * 60.0) + second # Incorrect assumption about 'minute'
+                
+                # Use the utility function which assumes 'minute' is time remaining in period
+                event_abs_seconds = get_absolute_seconds(period, minute, second)
+
             # --- On/Off tracking -------------------------------------------------
             delta = event_abs_seconds - last_event_abs_seconds
             if delta > 0:
                 for p in on_court:
                     self.on_secs[p] += delta
+                # ----- accumulate lineup seconds ONLY ------------------------
+                if len(on_court) == 5:
+                    lineup_tuple = tuple(sorted(on_court))
+                    self.lineup_stats[lineup_tuple]['secs'] += delta
+                    # REMOVE point accumulation from here
+                    # if pts:
+                    #    if is_target_team_event:
+                    #        self.lineup_stats[lineup_tuple]['pts_for'] += pts
+                    #    else:
+                    #        self.lineup_stats[lineup_tuple]['pts_against'] += pts
+                # ------------------------------------------------------------------
 
+            # Check for points scored in the CURRENT event
             pts = self.points_map.get(event_type, 0)
             if pts:
+                # Update team and player On/Off points
                 if is_target_team_event:
                     self.team_pts_f += pts
                     for p in on_court:
@@ -313,6 +339,16 @@ class StatsCalculator:
                     self.team_pts_a += pts
                     for p in on_court:
                         self.on_pts_a[p] += pts
+                
+                # --- ADD Lineup point accumulation HERE ---
+                if len(on_court) == 5:
+                    lineup_tuple = tuple(sorted(on_court))
+                    if is_target_team_event:
+                        self.lineup_stats[lineup_tuple]['pts_for'] += pts
+                    else:
+                        self.lineup_stats[lineup_tuple]['pts_against'] += pts
+                # --- END Lineup point accumulation ---
+                    
             # --------------------------------------------------------------------
             last_event_abs_seconds = event_abs_seconds
             game_end_sec = max(game_end_sec, event_abs_seconds) # Keep track of game end time
@@ -336,12 +372,15 @@ class StatsCalculator:
                 if event_type in ["Cistella de 3", "Triple"]:
                     pa.t3 += 1
                     pa.pts += 3
+                    per_game_points[actor_name] += 3
                 elif event_type in ["Cistella de 2", "Esmaixada"]:
                     pa.t2 += 1
                     pa.pts += 2
+                    per_game_points[actor_name] += 2
                 elif event_type == "Cistella de 1": # Correct event for FT made
                     pa.t1 += 1
                     pa.pts += 1
+                    per_game_points[actor_name] += 1
                 elif event_type.startswith("Personal"): # Check if it starts with Personal
                     pa.fouls += 1
                 # Add other event types if needed (rebounds, assists, etc.)
@@ -359,6 +398,7 @@ class StatsCalculator:
                     if st["status"] == "in":
                         duration = event_abs_seconds - st["since"]
                         self._credit_minutes(actor_name, duration)
+                        per_game_minutes[actor_name] += duration
                         # Credit pairwise time for player leaving
                         on_court.remove(actor_name)
                         for other_player in on_court:
@@ -372,11 +412,15 @@ class StatsCalculator:
         if remaining > 0:
             for p in on_court:
                 self.on_secs[p] += remaining
+        if len(on_court) == 5 and remaining > 0:
+            lineup_tuple = tuple(sorted(on_court))
+            self.lineup_stats[lineup_tuple]['secs'] += remaining
         # Credit remaining time for players still on court
         for p, st in player_state.items():
             if st["status"] == "in":
                 duration = game_end_sec - st["since"]
                 self._credit_minutes(p, duration)
+                per_game_minutes[p] += duration
                 # self.on_secs[p] += duration
                 # Credit remaining pairwise time
                 temp_on_court = on_court.copy()
@@ -388,10 +432,72 @@ class StatsCalculator:
         if player_state: # Only increment if the target team played and had events
             for player_name in player_state: 
                 self.players[player_name].gp += 1
-        
+
+        # ---- save per‑player game row -------------------------------------------
+        game_idx = len(self.game_log) // 1 + 1  # incremental index
+        for pname, secs in per_game_minutes.items():
+            self.game_log.append({
+                'game_idx': game_idx,
+                'player': pname,
+                'mins': round(secs / 60, 1),
+                'pts': per_game_points.get(pname, 0)
+            })
+
         return True # Indicate successful processing
 
     # ------------------------------------------------------------------
+    # Evolution (rolling) table
+    # ------------------------------------------------------------------
+    def evolution_table(self) -> pd.DataFrame:
+        df = pd.DataFrame(self.game_log)
+        if df.empty:
+            return df
+        df.sort_values('game_idx', inplace=True)
+        df['roll_pts'] = df.groupby('player')['pts'].transform(lambda s: s.rolling(3, 1).mean())
+        df['roll_mins'] = df.groupby('player')['mins'].transform(lambda s: s.rolling(3, 1).mean())
+        return df
+
+    # ------------------------------------------------------------------
+    # Lineup summary table
+    # ------------------------------------------------------------------
+    def lineup_table(self, min_usage: float = 0.05) -> pd.DataFrame:
+        """Return DataFrame of lineups filtered by usage with Net Rating.
+
+        Avoids KeyError when no qualifying lineups exist.
+        """
+        # Calculate total seconds across all tracked lineups with positive time
+        total_lineup_secs = sum(stats['secs'] for stats in self.lineup_stats.values() if stats.get('secs', 0) > 0)
+        if total_lineup_secs == 0:
+            logger.info("No lineup data with positive time found.")
+            return pd.DataFrame()
+
+        records = []
+        for lu, v in self.lineup_stats.items():
+            if v['secs'] <= 0:
+                continue
+            
+            # Calculate usage % relative to total lineup seconds
+            # usage = v['secs'] / total_team_secs
+            usage_percent = (v['secs'] / total_lineup_secs) * 100 if total_lineup_secs > 0 else 0
+            
+            # Filter based on the calculated percentage (min_usage is 0.0 to 1.0)
+            # if usage < min_usage:
+            if (usage_percent / 100.0) < min_usage:
+                continue
+                
+            net = (v['pts_for'] - v['pts_against']) * 40 / (v['secs'] / 60)
+            records.append({
+                'lineup': '- '.join(map(shorten_name, lu)), # Apply shortening here too
+                'mins': round(v['secs'] / 60, 1),
+                # 'usage_%': round(usage * 100, 1),
+                'usage_%': round(usage_percent, 1),
+                'NetRtg': round(net, 1)
+            })
+
+        df = pd.DataFrame(records)
+        if df.empty or 'NetRtg' not in df.columns:
+            return df  # nothing to sort
+        return df.sort_values('NetRtg', ascending=False).reset_index(drop=True)
 
     def _credit_minutes(self, player: str, secs: float) -> None:
         pa = self.players[player]
@@ -669,6 +775,20 @@ def print_results(calc: 'StatsCalculator'):
         print(onoff_df.to_string(index=False))
     else:
         print("(Insufficient data for On/Off calculation)")
+
+    print("\n==== Evolution (rolling 3‑games) sample ====")
+    evo = calc.evolution_table()
+    if not evo.empty:
+        print(evo.head(10).to_string(index=False))
+    else:
+        print("(No evolution data)")
+
+    print("\n==== Lineups (usage ≥5 %) ====")
+    lu_df = calc.lineup_table()
+    if not lu_df.empty:
+        print(lu_df.head(10).to_string(index=False))
+    else:
+        print("(No lineup data or insufficient usage)")
 
 
 if __name__ == "__main__":
