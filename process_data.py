@@ -22,7 +22,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Set
 
 import pandas as pd
 
@@ -170,6 +170,12 @@ class StatsCalculator:
         )
         self.team_pts: int = 0
         self.team_fouls: int = 0
+        # --- On/Off tracking ---
+        self.on_secs: Dict[str, float] = defaultdict(float)   # seconds with player ON court
+        self.on_pts_f: Dict[str, int] = defaultdict(int)      # points for while ON
+        self.on_pts_a: Dict[str, int] = defaultdict(int)      # points against while ON
+        self.team_pts_f: int = 0                              # total points for (team)
+        self.team_pts_a: int = 0                              # total points against
 
     # ------------------------------------------------------------------
     # Public API
@@ -291,6 +297,23 @@ class StatsCalculator:
             # Time elapsed in game = (period-1)*600 + (600 - time_remaining) 
             # Simplified: elapsed = (period-1)*600 + minute*60 + second (This seems correct based on data)
             event_abs_seconds = ((period - 1) * 600.0) + (minute * 60.0) + second
+            # --- On/Off tracking -------------------------------------------------
+            delta = event_abs_seconds - last_event_abs_seconds
+            if delta > 0:
+                for p in on_court:
+                    self.on_secs[p] += delta
+
+            pts = self.points_map.get(event_type, 0)
+            if pts:
+                if is_target_team_event:
+                    self.team_pts_f += pts
+                    for p in on_court:
+                        self.on_pts_f[p] += pts
+                else:
+                    self.team_pts_a += pts
+                    for p in on_court:
+                        self.on_pts_a[p] += pts
+            # --------------------------------------------------------------------
             last_event_abs_seconds = event_abs_seconds
             game_end_sec = max(game_end_sec, event_abs_seconds) # Keep track of game end time
 
@@ -344,11 +367,17 @@ class StatsCalculator:
                         st["since"] = event_abs_seconds
 
         # --- End of Game Processing --- 
+        # Flush remaining On/Off seconds from the last event until the final horn
+        remaining = game_end_sec - last_event_abs_seconds
+        if remaining > 0:
+            for p in on_court:
+                self.on_secs[p] += remaining
         # Credit remaining time for players still on court
         for p, st in player_state.items():
             if st["status"] == "in":
                 duration = game_end_sec - st["since"]
                 self._credit_minutes(p, duration)
+                # self.on_secs[p] += duration
                 # Credit remaining pairwise time
                 temp_on_court = on_court.copy()
                 temp_on_court.remove(p)
@@ -430,6 +459,50 @@ class StatsCalculator:
         
         # Ensure all values are integers before returning
         return matrix.astype(int)
+
+
+    # ------------------------------------------------------------------
+    # On/Off Net Rating table
+    # ------------------------------------------------------------------
+    def on_off_table(self) -> pd.DataFrame:
+        rows = []
+        total_secs = sum(self.on_secs.values())
+        if total_secs == 0:
+            return pd.DataFrame()  # no data
+
+        for player, secs_on in self.on_secs.items():
+            mins_on = secs_on / 60
+            if mins_on < 1:
+                continue  # skip very small samples
+
+            mins_off = (total_secs - secs_on) / 60
+            on_net = (self.on_pts_f[player] - self.on_pts_a[player]) * 40 / mins_on
+
+            if mins_off >= 1:
+                off_pts_f = self.team_pts_f - self.on_pts_f[player]
+                off_pts_a = self.team_pts_a - self.on_pts_a[player]
+                off_net = (off_pts_f - off_pts_a) * 40 / mins_off
+                diff = on_net - off_net
+            else:
+                off_net = None
+                diff = None
+
+            rows.append(
+                {
+                    "Player": shorten_name(player),
+                    "Mins_ON": round(mins_on, 1),
+                    "On_Net": round(on_net, 1),
+                    "Off_Net": round(off_net, 1) if off_net is not None else "—",
+                    "ON-OFF": round(diff, 1) if diff is not None else "—",
+                }
+            )
+        if not rows:
+            return pd.DataFrame()
+        return (
+            pd.DataFrame(rows)
+            .sort_values("ON-OFF", ascending=False, na_position="last")
+            .reset_index(drop=True)
+        )
 
 
 ################################################################################
@@ -589,6 +662,13 @@ def print_results(calc: 'StatsCalculator'):
         print(pair_df.iloc[:max_dim, :max_dim].to_string(float_format='{:d}'.format))
     else:
         print("(No data found for this team in the processed match(es))")
+
+    print("\n==== On/Off Net Rating ====")
+    onoff_df = calc.on_off_table()
+    if not onoff_df.empty:
+        print(onoff_df.to_string(index=False))
+    else:
+        print("(Insufficient data for On/Off calculation)")
 
 
 if __name__ == "__main__":
