@@ -1156,7 +1156,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Match Report: {{ match_id }} - {{ team_name }} vs {{ opponent_name }}</title>
+    <title>Match Report: {{ match_id }} - {{ local_name }} vs {{ visitor_name }}</title>
     <style>
         body { font-family: sans-serif; margin: 20px; }
         h1, h2, h3 { color: #333; }
@@ -1170,7 +1170,7 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h1>Match Report: {{ team_name }} vs {{ opponent_name }}</h1>
+    <h1>Match Report: {{ local_name }} vs {{ visitor_name }}</h1>
     <p><strong>Match ID:</strong> <a href="https://www.basquetcatala.cat/estadistiques/{{ season }}/{{ match_id }}" target="_blank" title="View official stats page">{{ match_id }}</a> | <strong>Date:</strong> {{ match_date }} | <strong>Group:</strong> {{ group_name }}</p>
 
     <div class="summary">
@@ -1184,7 +1184,7 @@ HTML_TEMPLATE = """
     </div>
     {% endif %}
 
-    <h2>{{ team_name }} Statistics</h2>
+    <h2>{{ target_team_name }} Statistics</h2>
 
     <h3>Player Aggregates</h3>
     {{ player_table_html | safe }}
@@ -1262,8 +1262,8 @@ INDEX_HTML_TEMPLATE = """
             <tr>
                 <th>Date</th>
                 <th>Group</th>
-                <th>Target Team</th>
-                <th>Opponent</th>
+                <th>Local</th>
+                <th>Visitor</th>
                 <th>Score</th>
                 <th>Report Link</th>
             </tr>
@@ -1273,9 +1273,9 @@ INDEX_HTML_TEMPLATE = """
             <tr>
                 <td>{{ report.match_date }}</td>
                 <td>{{ report.group_name }}</td>
-                <td>{{ report.team_name }}</td>
-                <td>{{ report.opponent_name }}</td>
-                <td>{{ report.score }}</td> {# Added Score #}
+                <td>{{ report.local_name }}</td>
+                <td>{{ report.visitor_name }}</td>
+                <td>{{ report.score }}</td> 
                 <td><a href="{{ report.report_path }}">{{ report.match_id }}</a></td>
             </tr>
             {% endfor %}
@@ -1481,14 +1481,16 @@ def main() -> None:
             match_date = match_info_row.get("date_time", "Unknown Date")  # Correct key
             # Group name - ideally load from a mapping like in process_data.py if available
             group_name = f"Group {gid}"  # Placeholder
+            score = match_info_row.get("score", "-")
 
             # --- Render HTML Report ---
             html_content = template.render(
                 match_id=match_id,
                 group_name=group_name,
                 match_date=match_date,
-                team_name=team_name,
-                opponent_name=opponent_name,
+                target_team_name=team_name, # Explicitly pass target team name
+                local_name=local_name, # Pass original local name
+                visitor_name=visitor_name, # Pass original visitor name
                 summary_html=summary_html,
                 player_table_html=player_table_html,
                 on_off_table_html=on_off_table_html,
@@ -1510,11 +1512,14 @@ def main() -> None:
             # Store report link info
             report_links_data.append({
                 'match_id': match_id,
-                'team_name': team_name,
+                'target_team_name': team_name, # Keep track of the target team
                 'opponent_name': opponent_name,
+                'local_name': local_name, # Store original local team name
+                'visitor_name': visitor_name, # Store original visitor team name
                 'match_date': match_date,
                 'group_name': group_name,
-                'report_path': str(report_html_path.relative_to(output_dir)) # Store as string
+                'score': score, # Add score here
+                'report_path': str(report_html_path.relative_to(output_dir))
             })
 
         logger.info(f"--- Finished Group: {gid} ---")
