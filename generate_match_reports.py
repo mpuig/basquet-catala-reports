@@ -73,7 +73,7 @@ ON_NET_PALETTE = "coolwarm"
 LINEUP_PALETTE = "viridis"
 
 # --- LLM Settings ---
-LLM_MODEL = "gpt-3.5-turbo"  # Default model for summary
+LLM_MODEL = "gpt-4.1"
 LLM_TEMPERATURE = 0.5
 LLM_MAX_TOKENS = 250
 
@@ -356,8 +356,8 @@ class StatsCalculator:
         for event in events:
             event_time_info = {
                 "period": event.get("period", 0),
-                "minute": event.get("minute", 0),
-                "second": event.get("second", 0),
+                "minute": event.get("min", 0),
+                "second": event.get("sec", 0),
             }
             event_abs_seconds = get_absolute_seconds(**event_time_info)
             delta_secs = event_abs_seconds - last_event_abs_seconds
@@ -650,7 +650,7 @@ class StatsCalculator:
 
             records.append(
                 {
-                    "lineup": "\n".join(map(shorten_name, lu)),
+                    "lineup": " - ".join(map(shorten_name, lu)),
                     "mins": round(v["secs"] / 60, 1),
                     "usage_%": round(usage_percent, 1),
                     "NetRtg": round(net, 1),
@@ -780,7 +780,7 @@ class StatsCalculator:
         # Iterate through filtered players
         for player, secs_on in valid_on_secs.items():
             mins_on = secs_on / 60
-            if mins_on < 0.1:  # Lower threshold for single game
+            if mins_on < 0.01:  # Use 2-decimal precision threshold
                 continue  # skip very small samples
 
             mins_off = (total_game_secs - secs_on) / 60
@@ -790,7 +790,7 @@ class StatsCalculator:
                 else 0
             )
 
-            if mins_off >= 0.1:  # Lower threshold for single game
+            if mins_off >= 0.01:  # Use 2-decimal precision threshold
                 off_pts_f = self.team_pts_f - self.on_pts_f[player]
                 off_pts_a = self.team_pts_a - self.on_pts_a[player]
                 # Protect division by zero if mins_off is effectively zero
@@ -803,7 +803,7 @@ class StatsCalculator:
             rows.append(
                 {
                     "Player": shorten_name(player),
-                    "Mins_ON": round(mins_on, 1),
+                    "Mins_ON": round(mins_on, 2),  # Changed rounding to 2 decimal places
                     "On_Net": round(on_net, 1),
                     "Off_Net": round(off_net, 1) if off_net is not None else "—",
                     "ON-OFF": round(diff, 1) if diff is not None else "—",
@@ -1042,10 +1042,14 @@ def plot_lineup_netrtg(
         logger.info("No valid numeric 'NetRtg' data for lineups, skipping plot.")
         return None
 
-    top_n = 10  # Show fewer lineups for single match
-    lineup_df_sorted = lineup_df.sort_values("NetRtg", ascending=False).head(top_n)
+    top_n = 5  # Changed from 10 to 5
+    # Make a copy before modifying for plotting
+    lineup_df_plot = lineup_df.sort_values("NetRtg", ascending=False).head(top_n).copy()
 
-    if lineup_df_sorted.empty:  # Check again after head(top_n)
+    # Replace hyphens with newlines *specifically for plot labels*
+    lineup_df_plot['lineup'] = lineup_df_plot['lineup'].str.replace(' - ', '\n', regex=False)
+
+    if lineup_df_plot.empty:  # Check again after head(top_n)
         logger.info("No lineups found after filtering top N, skipping plot.")
         return None
 
@@ -1053,19 +1057,19 @@ def plot_lineup_netrtg(
     relative_path = filename.name
 
     try:
-        plt.figure(figsize=(max(10, len(lineup_df_sorted) * 1.2), 6))  # Dynamic width
+        plt.figure(figsize=(max(10, len(lineup_df_plot) * 1.2), 6))  # Dynamic width
         barplot = sns.barplot(
-            x="lineup",
+            x="lineup",  # This now has newlines
             y="NetRtg",
             hue="lineup",  # Use hue for consistency, but legend=False
-            data=lineup_df_sorted,
+            data=lineup_df_plot,
             palette=LINEUP_PALETTE,
             legend=False,
         )
         # Add value labels
-        for i, row in lineup_df_sorted.iterrows():
+        for i, row in lineup_df_plot.iterrows():  # Use plot-specific df
             value = row.NetRtg
-            pos = lineup_df_sorted.index.get_loc(i)  # Get numerical position
+            pos = lineup_df_plot.index.get_loc(i)  # Get numerical position
             barplot.text(
                 pos,
                 value + (np.sign(value) * 1 if value != 0 else 1),
@@ -1075,20 +1079,20 @@ def plot_lineup_netrtg(
                 va="bottom" if value >= 0 else "top",
                 fontsize=9,
             )
-        plt.title(f"Top {len(lineup_df_sorted)} Lineup Net Rating (per 40 min)")
+        plt.title(f"Top {len(lineup_df_plot)} Lineup Net Rating (per 40 min)")
         plt.xlabel("Lineup")
         plt.ylabel("Net Rating")
         plt.xticks(rotation=0, ha="center")
         # Removed figtext
         plt.tight_layout()
         plt.savefig(filename, dpi=PLOT_DPI)
-        plt.close()
         logger.debug(f"Saved Lineup NetRtg Bar Chart: {filename}")
         return relative_path
     except Exception as e:
         logger.error(f"Failed to generate/save lineup NetRtg plot: {e}")
-        plt.close()
         return None
+    finally:
+        plt.close()  # Ensure plot is closed
 
 
 ################################################################################
@@ -1503,7 +1507,7 @@ def _generate_single_report(
         else "<p>(No On/Off data)</p>"
     )
     lineup_table_html = (
-        lineup_df.head(10).to_html(index=False, classes="stats-table", border=0)
+        lineup_df.head(5).to_html(index=False, classes="stats-table", border=0)
         if not lineup_df.empty
         else "<p>(No lineup data)</p>"
     )
@@ -1775,12 +1779,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # Add json import at the top if not already there
-    import json
-
-    # Need pandas for date sorting fallback
-    import pandas as pd
-
-    # Need traceback for debugging
-
     main()

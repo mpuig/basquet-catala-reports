@@ -351,27 +351,26 @@ class StatsCalculator:
         for event in events:
             event_type = event.get("move", "")
             period = event.get("period", 0)
-            minute = event.get("minute", 0)
-            second = event.get("second", 0)
+            minute = event.get("min", 0)
+            second = event.get("sec", 0)
             actor_name = event.get("actorName", "")
             actor_num = event.get("actorShirtNumber")
             event_team_id = event.get("idTeam")
             is_target_team_event = event_team_id == internal_id
 
             # Calculate absolute time in seconds for the event
+            event_abs_seconds = get_absolute_seconds(period, minute, second)
+
+            # Update period tracker
             if period > last_processed_period:
-                # Estimate period start time (assuming 10 min periods)
-                # This might be inaccurate if overtime exists or periods have different lengths
-                # A better approach would be to get actual period start/end times if available
                 last_processed_period = period
-                # Use the utility function which assumes 'minute' is time remaining in period
-                event_abs_seconds = get_absolute_seconds(period, minute, second)
+                # Remove redundant calculation: the value is already in event_abs_seconds
+                # event_abs_seconds = get_absolute_seconds(period, minute, second)
 
             # --- On/Off tracking -------------------------------------------------
             delta = event_abs_seconds - last_event_abs_seconds
             # current_lineup_tuple retains its value from the previous event unless delta > 0
             # Do NOT reset current_lineup_tuple here
-
             if delta > 0:
                 for p in on_court:
                     self.on_secs[p] += delta
@@ -459,13 +458,13 @@ class StatsCalculator:
                     pa.t2 += 1
                     pa.pts += 2
                     per_game_points[actor_name] += 2
-                elif event_type == "Cistella de 1":  # Correct event for FT made
+                elif event_type == "Cistella de 1":
                     pa.t1 += 1
                     pa.pts += 1
                     per_game_points[actor_name] += 1
                 elif event_type.startswith(
                     "Personal"
-                ):  # Check if it starts with Personal
+                ):
                     pa.fouls += 1
 
                 # --- Handle Minutes Played & Pairwise ---
@@ -543,7 +542,7 @@ class StatsCalculator:
                         {
                             "game_idx": game_idx,
                             "player": pname,
-                            "mins": round(secs / 60, 1),
+                            "mins": round(secs / 60, 2),
                             "pts": per_game_points.get(pname, 0),
                             "+/-": per_game_plusminus.get(pname, 0),
                             "drtg": (
@@ -553,7 +552,7 @@ class StatsCalculator:
                                         * 40
                                         / (secs / 60)
                                     ),
-                                    1,
+                                    1
                                 )
                                 if secs >= 60
                                 else None
@@ -635,7 +634,7 @@ class StatsCalculator:
 
             records.append(
                 {
-                    "lineup": "\n".join(map(shorten_name, lu)),
+                    "lineup": " - ".join(map(shorten_name, lu)),
                     "mins": round(v["secs"] / 60, 1),
                     "usage_%": round(usage_percent, 1),
                     "NetRtg": round(net, 1),
@@ -732,23 +731,39 @@ class StatsCalculator:
         valid_on_secs = {
             p: s for p, s in self.on_secs.items() if p not in names_to_exclude
         }
-        total_secs = sum(valid_on_secs.values())
-        if total_secs == 0:
-            return pd.DataFrame()  # no data
+        # Calculate total game seconds from the maximum player on_secs if available
+        # This assumes at least one player was on court for the whole game duration processed
+        total_game_secs = max(valid_on_secs.values()) if valid_on_secs else 0
+
+        if total_game_secs == 0:
+            # Fallback: estimate from game log if no valid_on_secs
+            if self.game_log:
+                # Use the unrounded mins from game_log if available
+                total_game_secs = max(row["mins"] for row in self.game_log) * 60
+            else:
+                logger.warning(
+                    "Could not determine total game seconds for On/Off calculation."
+                )
+                return pd.DataFrame()  # no data or way to calc off
 
         # Iterate through filtered players
         for player, secs_on in valid_on_secs.items():
             mins_on = secs_on / 60
-            if mins_on < 1:
+            if mins_on < 0.01:  # Adjusted threshold slightly for more precision
                 continue  # skip very small samples
 
-            mins_off = (total_secs - secs_on) / 60
-            on_net = (self.on_pts_f[player] - self.on_pts_a[player]) * 40 / mins_on
+            mins_off = (total_game_secs - secs_on) / 60
+            on_net = (
+                (self.on_pts_f[player] - self.on_pts_a[player]) * 40 / mins_on
+                if mins_on > 0
+                else 0
+            )
 
-            if mins_off >= 1:
+            if mins_off >= 0.01:  # Adjusted threshold slightly
                 off_pts_f = self.team_pts_f - self.on_pts_f[player]
                 off_pts_a = self.team_pts_a - self.on_pts_a[player]
-                off_net = (off_pts_f - off_pts_a) * 40 / mins_off
+                # Protect division by zero if mins_off is effectively zero
+                off_net = (off_pts_f - off_pts_a) * 40 / mins_off if mins_off > 0 else 0
                 diff = on_net - off_net
             else:
                 off_net = None
@@ -757,7 +772,7 @@ class StatsCalculator:
             rows.append(
                 {
                     "Player": shorten_name(player),
-                    "Mins_ON": round(mins_on, 1),
+                    "Mins_ON": round(mins_on, 2),  # Changed rounding
                     "On_Net": round(on_net, 1),
                     "Off_Net": round(off_net, 1) if off_net is not None else "—",
                     "ON-OFF": round(diff, 1) if diff is not None else "—",
@@ -765,11 +780,14 @@ class StatsCalculator:
             )
         if not rows:
             return pd.DataFrame()
-        return (
-            pd.DataFrame(rows)
-            .sort_values("ON-OFF", ascending=False, na_position="last")
-            .reset_index(drop=True)
-        )
+
+        df = pd.DataFrame(rows)
+        # Ensure ON-OFF is numeric for sorting, coercing errors to NaN
+        df["ON-OFF"] = pd.to_numeric(df["ON-OFF"], errors="coerce")
+
+        return df.sort_values(
+            "ON-OFF", ascending=False, na_position="last"
+        ).reset_index(drop=True)
 
 
 ################################################################################
@@ -865,7 +883,7 @@ def main() -> None:
                 # Check if the match ID exists in this group's schedule
                 match_row = schedule_df_group[
                     schedule_df_group["match_id"] == args.match
-                ]
+                    ]
                 if not match_row.empty:
                     logger.info(f"Match {args.match} found in group {gid} schedule.")
                     schedule_df_single = match_row
@@ -1546,7 +1564,15 @@ def plot_lineup_netrtg(
         return
 
     top_n = 15
-    lineup_df_sorted = lineup_df.sort_values("NetRtg", ascending=False).head(top_n)
+    # Make a copy before modifying for plotting
+    lineup_df_plot = lineup_df.sort_values("NetRtg", ascending=False).head(top_n).copy()
+
+    # Replace hyphens with newlines *specifically for plot labels*
+    lineup_df_plot['lineup'] = lineup_df_plot['lineup'].str.replace(' - ', '\n', regex=False)
+
+    if lineup_df_plot.empty:
+        logger.info(f"No lineup data to plot for group {group_name} after filtering.")
+        return
 
     plot_dir.mkdir(parents=True, exist_ok=True)
     filename = plot_dir / f"barchart_lineup_netrtg_group_{gid}.png"
@@ -1554,24 +1580,26 @@ def plot_lineup_netrtg(
     try:
         plt.figure(figsize=(14, 7))  # Increased width
         barplot = sns.barplot(
-            x="lineup",
+            x="lineup", # This now has newlines
             y="NetRtg",
-            hue="lineup",
-            data=lineup_df_sorted,
+            hue="lineup", # Use hue for consistency, but legend=False
+            data=lineup_df_plot,
             palette="viridis",
             legend=False,
         )
         # Add value labels
-        for index, row in lineup_df_sorted.iterrows():
+        for index, row in lineup_df_plot.iterrows(): # Iterate plot-specific df
+            # Use numerical index for positioning text on barplot
+            numerical_index = lineup_df_plot.index.get_loc(index)
             barplot.text(
-                index,
+                numerical_index,
                 row.NetRtg + (1 if row.NetRtg >= 0 else -1),
                 f"{row.NetRtg:.1f}",
                 color="black",
                 ha="center",
                 va="bottom" if row.NetRtg >= 0 else "top",
             )
-        plt.title(f"Top {top_n} Lineup Net Rating (per 40 min) - Group {group_name}")
+        plt.title(f"Top {len(lineup_df_plot)} Lineup Net Rating (per 40 min) - Group {group_name}")
         plt.xlabel("Lineup")
         plt.ylabel("Net Rating")
         plt.xticks(rotation=0, ha="center")  # Horizontal and centered labels
@@ -1637,10 +1665,10 @@ def plot_player_comparison_radar(
     try:
         player1_stats = g1_data["player_df"][
             g1_data["player_df"]["Player"] == shorten_name(player_name)
-        ].iloc[0]
+            ].iloc[0]
         player2_stats = g2_data["player_df"][
             g2_data["player_df"]["Player"] == shorten_name(player_name)
-        ].iloc[0]
+            ].iloc[0]
     except IndexError:
         logger.error(
             f"Could not find player '{player_name}' (shortened: {shorten_name(player_name)}) in the results for both groups. Check spelling and data."
