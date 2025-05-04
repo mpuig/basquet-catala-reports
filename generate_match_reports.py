@@ -19,19 +19,20 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
-import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence, Set, Any, Tuple, Optional
+from typing import Dict, List, Sequence, Set, Any, Optional
 
+import litellm
+import markdown2  # For converting summary.md to HTML
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-import markdown2 # For converting summary.md to HTML
+from jinja2 import Environment, select_autoescape
 
 ################################################################################
 # Configuration & logging                                                       #
@@ -196,8 +197,8 @@ class StatsCalculator:
         )
         self.plus_minus: Dict[str, int] = defaultdict(int)  # +/- por jugadora
         # --- Game-level summary ---
-        self.game_summaries: List[dict] = [] # Store {'game_idx': int, 'opponent_pts': int}
-        self.processed_matches: set[str] = set() # Track processed match IDs for summaries
+        self.game_summaries: List[dict] = []  # Store {'game_idx': int, 'opponent_pts': int}
+        self.processed_matches: set[str] = set()  # Track processed match IDs for summaries
 
     # ------------------------------------------------------------------
     # Public API
@@ -293,7 +294,7 @@ class StatsCalculator:
         per_game_points: Dict[str, int] = defaultdict(int)
         per_game_plusminus: Dict[str, int] = defaultdict(int)
         per_game_on_pts_a: Dict[str, int] = defaultdict(int)  # Added for per-game DRtg
-        game_opponent_pts: int = 0 # Total opponent points in this game
+        game_opponent_pts: int = 0  # Total opponent points in this game
         current_lineup_tuple: tuple | None = None  # Track lineup for event attribution
         player_state: Dict[str, Dict] = {}
         on_court: Set[str] = set()
@@ -355,7 +356,7 @@ class StatsCalculator:
                         self.on_pts_f[p] += pts
                 else:
                     self.team_pts_a += pts
-                    game_opponent_pts += pts # Accumulate opponent points for the game
+                    game_opponent_pts += pts  # Accumulate opponent points for the game
                     for p in on_court:
                         self.on_pts_a[p] += pts
                         per_game_on_pts_a[p] += pts
@@ -465,35 +466,35 @@ class StatsCalculator:
         # Increment GP for players who participated in this game
         # For single match report, GP will always be 1 if player played
         for player_name in player_state:
-            self.players[player_name].gp = 1 # Set GP to 1
+            self.players[player_name].gp = 1  # Set GP to 1
 
         # ---- save game summary (opponent points) --------------------------------
         # We only process one game, so game_idx is always 1 for logs/summaries
         game_idx = 1
         if player_state:
-             # Add summary if match hasn't been processed before (safeguard)
-             if match_id not in self.processed_matches:
-                 self.game_summaries.append({
-                     'game_idx': game_idx, # Always 1 for single match context
-                     'opponent_pts': game_opponent_pts
-                 })
-                 self.processed_matches.add(match_id)
+            # Add summary if match hasn't been processed before (safeguard)
+            if match_id not in self.processed_matches:
+                self.game_summaries.append({
+                    'game_idx': game_idx,  # Always 1 for single match context
+                    'opponent_pts': game_opponent_pts
+                })
+                self.processed_matches.add(match_id)
         # else:
         #     game_idx = None # No game index if no players/actions for target team
 
         # ---- save per‑player game row (for evolution-like data within the match) ---
         # This will be a single point per player if they played
-        if game_idx is not None: # Only log if game_idx was assigned (i.e., target team played)
+        if game_idx is not None:  # Only log if game_idx was assigned (i.e., target team played)
             for pname, secs in per_game_minutes.items():
                 if pname in self.players:  # Only log if player is tracked
                     self.game_log.append(
                         {
-                            "game_idx": game_idx, # Always 1
+                            "game_idx": game_idx,  # Always 1
                             "player": pname,
                             "mins": round(secs / 60, 1),
                             "pts": per_game_points.get(pname, 0),
                             "+/-": per_game_plusminus.get(pname, 0),
-                            "drtg": ( # DRtg doesn't make sense for single game, maybe remove later
+                            "drtg": (  # DRtg doesn't make sense for single game, maybe remove later
                                 round(
                                     (per_game_on_pts_a.get(pname, 0) * 40 / (secs / 60)), 1
                                 )
@@ -515,7 +516,7 @@ class StatsCalculator:
     # Lineup summary table
     # ------------------------------------------------------------------
     def lineup_table(
-        self, min_usage: float = 0.0, names_to_exclude: set[str] = set() # Lower default usage for single game
+        self, min_usage: float = 0.0, names_to_exclude: set[str] = set()  # Lower default usage for single game
     ) -> pd.DataFrame:
         """Return DataFrame of lineups filtered by usage with Net Rating.
 
@@ -659,23 +660,23 @@ class StatsCalculator:
         total_game_secs = max(valid_on_secs.values()) if valid_on_secs else 0
 
         if total_game_secs == 0:
-             # Fallback: estimate from game log if no valid_on_secs
-             if self.game_log:
-                 total_game_secs = max(row['mins'] for row in self.game_log) * 60
-             else:
-                 logger.warning("Could not determine total game seconds for On/Off calculation.")
-                 return pd.DataFrame() # no data or way to calc off
+            # Fallback: estimate from game log if no valid_on_secs
+            if self.game_log:
+                total_game_secs = max(row['mins'] for row in self.game_log) * 60
+            else:
+                logger.warning("Could not determine total game seconds for On/Off calculation.")
+                return pd.DataFrame()  # no data or way to calc off
 
         # Iterate through filtered players
         for player, secs_on in valid_on_secs.items():
             mins_on = secs_on / 60
-            if mins_on < 0.1: # Lower threshold for single game
+            if mins_on < 0.1:  # Lower threshold for single game
                 continue  # skip very small samples
 
             mins_off = (total_game_secs - secs_on) / 60
             on_net = (self.on_pts_f[player] - self.on_pts_a[player]) * 40 / mins_on if mins_on > 0 else 0
 
-            if mins_off >= 0.1: # Lower threshold for single game
+            if mins_off >= 0.1:  # Lower threshold for single game
                 off_pts_f = self.team_pts_f - self.on_pts_f[player]
                 off_pts_a = self.team_pts_a - self.on_pts_a[player]
                 # Protect division by zero if mins_off is effectively zero
@@ -703,11 +704,13 @@ class StatsCalculator:
 
         return df.sort_values("ON-OFF", ascending=False, na_position="last").reset_index(drop=True)
 
+
 ################################################################################
 # Plotting Functions (Adapted for single match reports)                         #
 ################################################################################
 
-def plot_score_timeline(match_moves: List[dict], match_stats: dict, match_output_dir: Path, target_team_id: str) -> Optional[str]:
+def plot_score_timeline(match_moves: List[dict], match_stats: dict, match_output_dir: Path, target_team_id: str) -> \
+Optional[str]:
     """Generates a line plot showing the score progression over time."""
     if not match_moves:
         return None
@@ -725,7 +728,7 @@ def plot_score_timeline(match_moves: List[dict], match_stats: dict, match_output
             # This logic assumes target team is one of the two teams in match_stats
             # We need to figure out if target was local or visitor *in this match*
             # Let's find both internal IDs first
-            pass # Need a robust way to map local/visitor schedule ID to internal ID
+            pass  # Need a robust way to map local/visitor schedule ID to internal ID
 
     # Simplified: Assume team 0 in match_stats is local, team 1 is visitor (based on structure)
     # This might be fragile if the order isn't guaranteed.
@@ -737,8 +740,8 @@ def plot_score_timeline(match_moves: List[dict], match_stats: dict, match_output
         return None
 
     if not local_internal_id or not visitor_internal_id:
-         logger.warning("Internal IDs missing for score timeline plot.")
-         return None
+        logger.warning("Internal IDs missing for score timeline plot.")
+        return None
 
     # Get team names from match_stats for legend
     local_name = match_stats['teams'][0].get('name', 'Local')
@@ -750,7 +753,8 @@ def plot_score_timeline(match_moves: List[dict], match_stats: dict, match_output
 
     points_map = {"Cistella de 1": 1, "Cistella de 2": 2, "Cistella de 3": 3}
 
-    for event in sorted(match_moves, key=lambda x: get_absolute_seconds(x.get('period', 0), x.get('min', 0), x.get('sec', 0))):
+    for event in sorted(match_moves,
+                        key=lambda x: get_absolute_seconds(x.get('period', 0), x.get('min', 0), x.get('sec', 0))):
         event_time = get_absolute_seconds(event.get('period', 0), event.get('min', 0), event.get('sec', 0))
         pts = points_map.get(event.get('move', ''), 0)
         if pts > 0:
@@ -760,9 +764,9 @@ def plot_score_timeline(match_moves: List[dict], match_stats: dict, match_output
             elif event_team_id == visitor_internal_id:
                 current_visitor_score += pts
             else:
-                continue # Skip points from unknown team IDs if any
+                continue  # Skip points from unknown team IDs if any
 
-            times.append(event_time / 60) # Convert to minutes
+            times.append(event_time / 60)  # Convert to minutes
             local_scores.append(current_local_score)
             visitor_scores.append(current_visitor_score)
 
@@ -785,7 +789,7 @@ def plot_score_timeline(match_moves: List[dict], match_stats: dict, match_output
         return relative_path
     except Exception as e:
         logger.error(f"Failed to generate score timeline plot: {e}")
-        plt.close() # Attempt to close figure on error
+        plt.close()  # Attempt to close figure on error
         return None
 
 
@@ -802,7 +806,7 @@ def plot_pairwise_heatmap(pairwise_df: pd.DataFrame, match_output_dir: Path) -> 
     relative_path = filename.name
 
     try:
-        plt.figure(figsize=(max(6, pairwise_df.shape[1] * 0.8), max(4, pairwise_df.shape[0] * 0.6))) # Dynamic size
+        plt.figure(figsize=(max(6, pairwise_df.shape[1] * 0.8), max(4, pairwise_df.shape[0] * 0.6)))  # Dynamic size
         sns.heatmap(pairwise_df, annot=True, fmt="d", cmap="Reds", linewidths=0.5)
         plt.title(f"Pairwise Minutes Played Together")
         plt.xticks(rotation=45, ha="right")
@@ -840,11 +844,11 @@ def plot_player_on_net(onoff_df: pd.DataFrame, match_output_dir: Path) -> Option
     relative_path = filename.name
 
     try:
-        plt.figure(figsize=(max(8, len(onoff_df_sorted)*0.6), 5)) # Dynamic width
+        plt.figure(figsize=(max(8, len(onoff_df_sorted) * 0.6), 5))  # Dynamic width
         barplot = sns.barplot(
             x="Player",
             y="On_Net",
-            hue="Player", # Use hue for consistency, but legend=False
+            hue="Player",  # Use hue for consistency, but legend=False
             data=onoff_df_sorted,
             palette="coolwarm",
             legend=False,
@@ -852,10 +856,10 @@ def plot_player_on_net(onoff_df: pd.DataFrame, match_output_dir: Path) -> Option
         # Add value labels on bars - adjust text positioning slightly
         for i, row in onoff_df_sorted.iterrows():
             value = row.On_Net
-            pos = i # Use index for bar position
+            pos = i  # Use index for bar position
             barplot.text(
                 pos,
-                value + (np.sign(value) * 1 if value != 0 else 1), # Adjust offset
+                value + (np.sign(value) * 1 if value != 0 else 1),  # Adjust offset
                 f"{value:.1f}",
                 color="black",
                 ha="center",
@@ -893,10 +897,10 @@ def plot_lineup_netrtg(lineup_df: pd.DataFrame, match_output_dir: Path) -> Optio
         logger.info("No valid numeric 'NetRtg' data for lineups, skipping plot.")
         return None
 
-    top_n = 10 # Show fewer lineups for single match
+    top_n = 10  # Show fewer lineups for single match
     lineup_df_sorted = lineup_df.sort_values("NetRtg", ascending=False).head(top_n)
 
-    if lineup_df_sorted.empty: # Check again after head(top_n)
+    if lineup_df_sorted.empty:  # Check again after head(top_n)
         logger.info("No lineups found after filtering top N, skipping plot.")
         return None
 
@@ -904,11 +908,11 @@ def plot_lineup_netrtg(lineup_df: pd.DataFrame, match_output_dir: Path) -> Optio
     relative_path = filename.name
 
     try:
-        plt.figure(figsize=(max(10, len(lineup_df_sorted)*1.2), 6)) # Dynamic width
+        plt.figure(figsize=(max(10, len(lineup_df_sorted) * 1.2), 6))  # Dynamic width
         barplot = sns.barplot(
             x="lineup",
             y="NetRtg",
-            hue="lineup", # Use hue for consistency, but legend=False
+            hue="lineup",  # Use hue for consistency, but legend=False
             data=lineup_df_sorted,
             palette="viridis",
             legend=False,
@@ -916,7 +920,7 @@ def plot_lineup_netrtg(lineup_df: pd.DataFrame, match_output_dir: Path) -> Optio
         # Add value labels
         for i, row in lineup_df_sorted.iterrows():
             value = row.NetRtg
-            pos = lineup_df_sorted.index.get_loc(i) # Get numerical position
+            pos = lineup_df_sorted.index.get_loc(i)  # Get numerical position
             barplot.text(
                 pos,
                 value + (np.sign(value) * 1 if value != 0 else 1),
@@ -1009,15 +1013,138 @@ def generate_summary_md(match_info: pd.Series, match_stats: dict, target_team_id
             os_data = opponent_stats.get('data', {})
 
             summary_lines.append(f"| Points       | {ts_data.get('score', '?')} | {os_data.get('score', '?')} |")
-            summary_lines.append(f"| T2 Made/Att  | {ts_data.get('shotsOfTwoSuccessful', '?')}/{ts_data.get('shotsOfTwoAttempted', '?')} | {os_data.get('shotsOfTwoSuccessful', '?')}/{os_data.get('shotsOfTwoAttempted', '?')} |")
-            summary_lines.append(f"| T3 Made/Att  | {ts_data.get('shotsOfThreeSuccessful', '?')}/{ts_data.get('shotsOfThreeAttempted', '?')} | {os_data.get('shotsOfThreeSuccessful', '?')}/{os_data.get('shotsOfThreeAttempted', '?')} |")
-            summary_lines.append(f"| T1 Made/Att  | {ts_data.get('shotsOfOneSuccessful', '?')}/{ts_data.get('shotsOfOneAttempted', '?')} | {os_data.get('shotsOfOneSuccessful', '?')}/{os_data.get('shotsOfOneAttempted', '?')} |")
+            summary_lines.append(
+                f"| T2 Made/Att  | {ts_data.get('shotsOfTwoSuccessful', '?')}/{ts_data.get('shotsOfTwoAttempted', '?')} | {os_data.get('shotsOfTwoSuccessful', '?')}/{os_data.get('shotsOfTwoAttempted', '?')} |")
+            summary_lines.append(
+                f"| T3 Made/Att  | {ts_data.get('shotsOfThreeSuccessful', '?')}/{ts_data.get('shotsOfThreeAttempted', '?')} | {os_data.get('shotsOfThreeSuccessful', '?')}/{os_data.get('shotsOfThreeAttempted', '?')} |")
+            summary_lines.append(
+                f"| T1 Made/Att  | {ts_data.get('shotsOfOneSuccessful', '?')}/{ts_data.get('shotsOfOneAttempted', '?')} | {os_data.get('shotsOfOneSuccessful', '?')}/{os_data.get('shotsOfOneAttempted', '?')} |")
             summary_lines.append(f"| Fouls        | {ts_data.get('faults', '?')} | {os_data.get('faults', '?')} |")
             summary_lines.append(f"")
         else:
             logger.warning(f"Could not properly match teams in match_stats for {match_id}")
 
     return "\n".join(summary_lines)
+
+
+def generate_llm_summary(
+    match_info: pd.Series,
+    match_stats: dict,
+    target_team_id: str,
+    player_stats_df: pd.DataFrame,
+) -> Optional[str]:
+    """Generates a narrative match summary using an LLM via litellm."""
+    logger.info("Attempting to generate LLM summary...")
+
+    # --- Prepare data for prompt ---
+    local_name = match_info.get("local_team", "Local")
+    visitor_name = match_info.get("visitor_team", "Visitor")
+    local_id = str(match_info.get("local_team_id", ""))
+    is_target_local = target_team_id == local_id
+    target_team_name = local_name if is_target_local else visitor_name
+    opponent_team_name = visitor_name if is_target_local else local_name
+    score = match_info.get("score", "-")
+    match_date_time = match_info.get("date_time", "Unknown")
+
+    # Team stats comparison (extract from generate_summary_md logic)
+    team_stats_summary = "(Team stats comparison not available)"
+    if 'teams' in match_stats and len(match_stats['teams']) == 2:
+        team1_stats = match_stats['teams'][0]
+        team2_stats = match_stats['teams'][1]
+        target_stats = None
+        opponent_stats = None
+        if str(team1_stats.get('teamIdExtern')) == target_team_id:
+            target_stats = team1_stats
+            opponent_stats = team2_stats
+        elif str(team2_stats.get('teamIdExtern')) == target_team_id:
+            target_stats = team2_stats
+            opponent_stats = team1_stats
+
+        if target_stats and opponent_stats:
+            ts_data = target_stats.get('data', {})
+            os_data = opponent_stats.get('data', {})
+            team_stats_lines = [
+                f"- Points: {ts_data.get('score', '?')} vs {os_data.get('score', '?')}",
+                f"- T2: {ts_data.get('shotsOfTwoSuccessful', '?')}/{ts_data.get('shotsOfTwoAttempted', '?')} vs {os_data.get('shotsOfTwoSuccessful', '?')}",
+                f"- T3: {ts_data.get('shotsOfThreeSuccessful', '?')}/{ts_data.get('shotsOfThreeAttempted', '?')} vs {os_data.get('shotsOfThreeSuccessful', '?')}",
+                f"- T1: {ts_data.get('shotsOfOneSuccessful', '?')}/{ts_data.get('shotsOfOneAttempted', '?')} vs {os_data.get('shotsOfOneSuccessful', '?')}",
+                f"- Fouls: {ts_data.get('faults', '?')} vs {os_data.get('faults', '?')}",
+            ]
+            team_stats_summary = "\n".join(team_stats_lines)
+
+    # Top player stats (e.g., top 3 scorers for target team)
+    top_players_summary = "(No player stats available)"
+    if not player_stats_df.empty:
+        top_scorers = player_stats_df.nlargest(3, 'PTS')[['Player', 'PTS']]
+        top_players_lines = [
+            f"- {row['Player']}: {row['PTS']} PTS" for _, row in top_scorers.iterrows()
+        ]
+        top_players_summary = "\n".join(top_players_lines)
+
+    # Optional momentum data – inject if available
+    momentum_section = ""
+    if momentum_info := match_stats.get("momentum"):
+        momentum_section = f"""
+    Momentum Insights:
+    - Lead changes: {momentum_info.get('lead_changes', '?')}
+    - Ties: {momentum_info.get('ties', '?')}
+    - Largest lead held: {momentum_info.get('max_lead', '?')} points
+    """
+
+    # Optional per-quarter scores
+    quarters_section = ""
+    if 'quarters' in match_stats:
+        quarters = match_stats['quarters']
+        quarters_str = " | ".join(
+            f"Q{i + 1}: {q.get('home', '?')}-{q.get('away', '?')}" for i, q in enumerate(quarters))
+        quarters_section = f"\nScoring by Quarter:\n{quarters_str}\n"
+
+    # Final Prompt
+    prompt = f"""
+    Generate a concise and informative 2-paragraph summary of a youth basketball match, focusing on the team "{target_team_name}".
+
+    Match Context:
+    - Date: {match_date_time}
+    - Home: {local_name}
+    - Opponent: {visitor_name}
+    - Final Score: {score} ({local_name} vs {visitor_name})
+
+    Team Comparison ({target_team_name} vs {opponent_team_name}):
+    {team_stats_summary}
+
+    Top Scorers ({target_team_name}):
+    {top_players_summary}
+    {quarters_section}
+    {momentum_section}
+    Instructions:
+    - Use a neutral and analytical tone, like a coach's or media summary.
+    - Emphasize "{target_team_name}" performance: scoring rhythm, defense, substitutions.
+    - Mention key momentum phases (e.g., big runs, fouls, FT%, lead changes).
+    - Highlight top scorer contributions in-game context.
+    - Keep output to 2 short but informative paragraphs (~150 words total).
+    """
+
+    # --- Call LLM via litellm ---
+    # Check for API key (assuming OpenAI for default)
+    if not os.environ.get("OPENAI_API_KEY"):
+        logger.warning("OPENAI_API_KEY environment variable not set. Skipping LLM summary.")
+        return None
+
+    try:
+        # Use a common default model, consider making this configurable
+        response = litellm.completion(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=250,  # Limit output length
+            temperature=0.5,  # Lower temperature for more factual summary
+        )
+        summary_text = response.choices[0].message.content.strip()
+        logger.info("LLM summary generated successfully.")
+        return summary_text
+    except Exception as e:
+        logger.error(f"Failed to generate LLM summary using litellm: {e}")
+        return None
+
 
 ################################################################################
 # HTML Template (Basic Placeholder)                                            #
@@ -1049,6 +1176,13 @@ HTML_TEMPLATE = """
     <div class="summary">
         {{ summary_html | safe }}
     </div>
+
+    {% if llm_summary %}
+    <h2>AI Generated Summary</h2>
+    <div class="summary">
+        <p>{{ llm_summary }}</p>
+    </div>
+    {% endif %}
 
     <h2>{{ team_name }} Statistics</h2>
 
@@ -1101,6 +1235,62 @@ HTML_TEMPLATE = """
 </html>
 """
 
+INDEX_HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Match Report Index</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        h1 { color: #333; }
+        table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        a { text-decoration: none; color: #0066cc; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <h1>Match Report Index</h1>
+    
+    {% if reports %}
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Group</th>
+                <th>Home Team</th>
+                <th>Away Team</th>
+                <th>Report Link</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for report in reports | sort(attribute='match_date') %}
+            <tr>
+                <td>{{ report.match_date }}</td>
+                <td>{{ report.group_name }}</td>
+                {# Determine home/away based on who the target team is #}
+                {% set home_team = report.team_name if report.team_name == report.match_info.local_team else report.opponent_name %}
+                {% set away_team = report.opponent_name if report.team_name == report.match_info.local_team else report.team_name %}
+                <td>{{ home_team }}</td>
+                <td>{{ away_team }}</td>
+                <td><a href="{{ report.report_path }}">{{ report.match_id }}</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No match reports were generated.</p>
+    {% endif %}
+
+</body>
+</html>
+"""
+
+
 ################################################################################
 # CLI entrypoint                                                               #
 ################################################################################
@@ -1139,9 +1329,8 @@ def main() -> None:
     # Jinja2 Environment
     # For simplicity, embedding template here. Could load from file.
     # env = Environment(loader=FileSystemLoader('.'), autoescape=select_autoescape(['html', 'xml'])) # Example if loading from file
-    env = Environment(loader=None, autoescape=select_autoescape(['html', 'xml'])) # Loader=None as template is string
+    env = Environment(loader=None, autoescape=select_autoescape(['html', 'xml']))  # Loader=None as template is string
     template = env.from_string(HTML_TEMPLATE)
-
 
     logger.info(f"Starting report generation for Team ID: {target_team_id}")
     logger.info(f"Data Source: {data_dir.resolve()}")
@@ -1149,6 +1338,7 @@ def main() -> None:
 
     processed_match_count = 0
     skipped_match_count = 0
+    report_links_data = [] # Initialize list to store report link info
 
     for gid in args.groups:
         logger.info(f"--- Processing Group: {gid} ---")
@@ -1167,17 +1357,31 @@ def main() -> None:
         # Iterate through each match in the group schedule
         for index, match_info_row in schedule_df.iterrows():
             match_id = str(match_info_row.get("match_id", ""))
-            local_team_id = str(match_info_row.get("local_team_id", "")) # Correct key
-            visitor_team_id = str(match_info_row.get("visitor_team_id", "")) # Correct key
-            local_name = match_info_row.get("local_team", "?") # Use correct key for name too
-            visitor_name = match_info_row.get("visitor_team", "?") # Use correct key for name too
+            
+            # --- Robust Team ID Conversion ---
+            try:
+                # Attempt float -> int -> str conversion to strip ".0"
+                local_team_id = str(int(float(match_info_row.get("local_team_id", ""))))
+            except (ValueError, TypeError):
+                # Fallback if ID is not numeric (e.g., 'Descansa')
+                local_team_id = str(match_info_row.get("local_team_id", ""))
+                
+            try:
+                visitor_team_id = str(int(float(match_info_row.get("visitor_team_id", ""))))
+            except (ValueError, TypeError):
+                visitor_team_id = str(match_info_row.get("visitor_team_id", ""))
+            # --- End Robust Team ID Conversion ---
 
-            if not match_id:
-                logger.warning("Skipping row with missing match_id in %s", csv_path)
+            local_name = match_info_row.get("local_team", "?")
+            visitor_name = match_info_row.get("visitor_team", "?")
+
+            if not match_id or match_id.lower() == 'nan': # Also check for 'nan' string
+                logger.warning("Skipping row with missing or invalid match_id in %s", csv_path)
                 continue
 
             # --- Debugging Log ---
-            logger.debug(f"Match {match_id}: Local={local_name} ({local_team_id}), Visitor={visitor_name} ({visitor_team_id}), Target={target_team_id}")
+            logger.debug(
+                f"Match {match_id}: Local={local_name} ({local_team_id}), Visitor={visitor_name} ({visitor_team_id}), Target={target_team_id}")
             # --- End Debugging Log ---
 
             # Check if the target team played in this match
@@ -1201,10 +1405,10 @@ def main() -> None:
                 skipped_match_count += 1
                 continue
             if not match_stats:
-                 logger.warning(f"Missing stats JSON for match {match_id}. Cannot generate full report.")
-                 # Optionally create a minimal report or skip
-                 skipped_match_count += 1
-                 continue
+                logger.warning(f"Missing stats JSON for match {match_id}. Cannot generate full report.")
+                # Optionally create a minimal report or skip
+                skipped_match_count += 1
+                continue
 
             # --- Calculate Stats for the target team in this match ---
             # Instantiate calculator for THIS team and THIS match
@@ -1226,29 +1430,58 @@ def main() -> None:
             summary_html = markdown2.markdown(summary_content, extras=["tables"])
 
             # 2. Statistics Tables (from calc)
-            player_df = calc.player_table() # Note: excludes handled if arg added later
+            player_df = calc.player_table()  # Note: excludes handled if arg added later
             onoff_df = calc.on_off_table()
-            lineup_df = calc.lineup_table() # Uses lower default min_usage
+            lineup_df = calc.lineup_table()  # Uses lower default min_usage
 
-            player_table_html = player_df.to_html(index=False, classes='stats-table', border=0) if not player_df.empty else "<p>(No player data)</p>"
-            on_off_table_html = onoff_df.to_html(index=False, classes='stats-table', border=0) if not onoff_df.empty else "<p>(No On/Off data)</p>"
+            player_table_html = player_df.to_html(index=False, classes='stats-table',
+                                                  border=0) if not player_df.empty else "<p>(No player data)</p>"
+            on_off_table_html = onoff_df.to_html(index=False, classes='stats-table',
+                                                 border=0) if not onoff_df.empty else "<p>(No On/Off data)</p>"
             lineup_table_html = lineup_df.head(10).to_html(index=False, classes='stats-table', border=0) if not lineup_df.empty else "<p>(No lineup data)</p>"
 
+            # 3. AI Summary (Cached)
+            llm_summary_text = None
+            llm_summary_md_path = match_output_dir / "llm_summary.md"
 
-            # 3. Charts (PNGs) - Placeholder paths, functions to be added/called
+            if llm_summary_md_path.exists():
+                try:
+                    llm_summary_text = llm_summary_md_path.read_text(encoding='utf-8').strip()
+                    if llm_summary_text: # Ensure we read something
+                        logger.info(f"Using cached LLM summary from: {llm_summary_md_path}")
+                    else:
+                        logger.warning(f"Cached LLM summary file is empty: {llm_summary_md_path}. Will attempt regeneration.")
+                        llm_summary_text = None # Treat empty file as non-existent for regeneration
+                except Exception as e:
+                    logger.error(f"Error reading cached LLM summary {llm_summary_md_path}: {e}. Will attempt regeneration.")
+                    llm_summary_text = None # Attempt regeneration on read error
+            
+            if llm_summary_text is None: # If cache doesn't exist, is empty, or failed to read
+                logger.info(f"LLM summary cache not found or invalid. Generating...")
+                llm_summary_text = generate_llm_summary(
+                    match_info_row, match_stats, target_team_id, player_df
+                )
+                if llm_summary_text:
+                    try:
+                        llm_summary_md_path.write_text(llm_summary_text, encoding='utf-8')
+                        logger.info(f"Saved newly generated LLM summary to: {llm_summary_md_path}")
+                    except Exception as e:
+                        logger.error(f"Error writing LLM summary cache {llm_summary_md_path}: {e}")
+
+            # 4. Charts (PNGs) - Placeholder paths, functions to be added/called
             score_timeline_path_rel = plot_score_timeline(match_moves, match_stats, match_output_dir, target_team_id)
             pairwise_heatmap_path_rel = plot_pairwise_heatmap(calc.pairwise_minutes(), match_output_dir)
             on_net_chart_path_rel = plot_player_on_net(onoff_df, match_output_dir)
             lineup_chart_path_rel = plot_lineup_netrtg(lineup_df, match_output_dir)
 
             # --- Get Team Names for Report Title ---
-            local_name = match_info_row.get("local_team", "Local Team") # Correct key
-            visitor_name = match_info_row.get("visitor_team", "Visitor Team") # Correct key
+            local_name = match_info_row.get("local_team", "Local Team")  # Correct key
+            visitor_name = match_info_row.get("visitor_team", "Visitor Team")  # Correct key
             team_name = local_name if target_team_id == local_team_id else visitor_name
             opponent_name = visitor_name if target_team_id == local_team_id else local_name
-            match_date = match_info_row.get("date_time", "Unknown Date") # Correct key
+            match_date = match_info_row.get("date_time", "Unknown Date")  # Correct key
             # Group name - ideally load from a mapping like in process_data.py if available
-            group_name = f"Group {gid}" # Placeholder
+            group_name = f"Group {gid}"  # Placeholder
 
             # --- Render HTML Report ---
             html_content = template.render(
@@ -1266,13 +1499,24 @@ def main() -> None:
                 pairwise_heatmap_path=pairwise_heatmap_path_rel,
                 on_net_chart_path=on_net_chart_path_rel,
                 lineup_chart_path=lineup_chart_path_rel,
-                season=args.season, # Add season for link generation
+                season=args.season,  # Add season for link generation
+                llm_summary=llm_summary_text,  # Add LLM summary
             )
 
             report_html_path = match_output_dir / "report.html"
             report_html_path.write_text(html_content, encoding='utf-8')
-            logger.info(f"-> Successfully generated report skeleton: {report_html_path}")
+            logger.info(f"-> Successfully generated report: {report_html_path}")
             processed_match_count += 1
+
+            # Store report link info
+            report_links_data.append({
+                'match_id': match_id,
+                'team_name': team_name,
+                'opponent_name': opponent_name,
+                'match_date': match_date,
+                'group_name': group_name,
+                'report_path': str(report_html_path.relative_to(output_dir)) # Store as string
+            })
 
         logger.info(f"--- Finished Group: {gid} ---")
 
@@ -1280,6 +1524,27 @@ def main() -> None:
     logger.info(f"Successfully processed {processed_match_count} matches.")
     if skipped_match_count > 0:
         logger.warning(f"Skipped {skipped_match_count} matches due to missing data.")
+
+    # Save report links data to file
+    report_links_file_path = output_dir / "report_links.json"
+    report_links_file_path.write_text(json.dumps(report_links_data), encoding='utf-8')
+    logger.info(f"Saved report links to: {report_links_file_path}")
+
+    # --- Generate Index HTML --- 
+    if report_links_data:
+        logger.info("Generating index.html...")
+        try:
+            index_template = env.from_string(INDEX_HTML_TEMPLATE)
+            # Sort reports by date before rendering
+            sorted_reports = sorted(report_links_data, key=lambda x: x.get('match_date', ''))
+            index_html_content = index_template.render(reports=sorted_reports)
+            index_html_path = output_dir / "index.html"
+            index_html_path.write_text(index_html_content, encoding='utf-8')
+            logger.info(f"Successfully generated index file: {index_html_path}")
+        except Exception as e:
+            logger.error(f"Failed to generate index.html: {e}")
+    else:
+        logger.info("No reports were generated, skipping index.html creation.")
 
 
 if __name__ == "__main__":

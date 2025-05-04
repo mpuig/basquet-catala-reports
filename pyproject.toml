@@ -9,6 +9,7 @@ dependencies = [
     "jinja2>=3.1.5",
     "jupyter>=1.1.1",
     "jupyterlab>=4.3.4",
+    "litellm>=1.68.0",
     "markdown2>=2.5.3",
     "matplotlib>=3.10.1",
     "pandas>=2.2.3",
