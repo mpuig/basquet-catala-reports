@@ -154,14 +154,22 @@ def parse_group_schedule(group_id: str) -> List[MatchInfo]:
                 and "Descansa" in row.get_text()
             ):
                 team_link = row.find("a", class_="teamNameLink")
-                team = team_link.get_text(strip=True) if team_link else row.get_text(strip=True)
-                team_id = team_link["href"].strip("/").split("/")[-1] if team_link else "N/A"
+                team = (
+                    team_link.get_text(strip=True)
+                    if team_link
+                    else row.get_text(strip=True)
+                )
+                team_id = (
+                    team_link["href"].strip("/").split("/")[-1] if team_link else "N/A"
+                )
                 matches.append(
                     MatchInfo(jornada, "", team, team_id, "Descansa", "N/A", "", "N/A")
                 )
                 continue
 
-            fila = row if row.get("id") != "fila" else row.find("div", class_="rowJornada")
+            fila = (
+                row if row.get("id") != "fila" else row.find("div", class_="rowJornada")
+            )
             if not fila or "rowJornada" not in fila.get("class", []):
                 continue
 
@@ -180,17 +188,35 @@ def parse_group_schedule(group_id: str) -> List[MatchInfo]:
 
             # local
             local_link = cols[0].find("a", class_="teamNameLink")
-            local_team = local_link.get_text(strip=True) if local_link else cols[0].get_text(strip=True)
-            local_team_id = local_link["href"].strip("/").split("/")[-1] if local_link else "N/A"
+            local_team = (
+                local_link.get_text(strip=True)
+                if local_link
+                else cols[0].get_text(strip=True)
+            )
+            local_team_id = (
+                local_link["href"].strip("/").split("/")[-1] if local_link else "N/A"
+            )
 
             # date/time
             date_div = cols[1].find("div", id="time2")
-            date_time = date_div.get_text(strip=True) if date_div else cols[1].get_text(strip=True)
+            date_time = (
+                date_div.get_text(strip=True)
+                if date_div
+                else cols[1].get_text(strip=True)
+            )
 
             # visitor
             visitor_link = cols[2].find("a", class_="teamNameLink")
-            visitor_team = visitor_link.get_text(strip=True) if visitor_link else cols[2].get_text(strip=True)
-            visitor_team_id = visitor_link["href"].strip("/").split("/")[-1] if visitor_link else "N/A"
+            visitor_team = (
+                visitor_link.get_text(strip=True)
+                if visitor_link
+                else cols[2].get_text(strip=True)
+            )
+            visitor_team_id = (
+                visitor_link["href"].strip("/").split("/")[-1]
+                if visitor_link
+                else "N/A"
+            )
 
             # score and match id
             sc_cols = score_row.find_all("div", class_=re.compile(r"col-md-4"))
@@ -200,7 +226,9 @@ def parse_group_schedule(group_id: str) -> List[MatchInfo]:
                 score = f"{sc_cols[0].get_text(strip=True)}-{sc_cols[2].get_text(strip=True)}"
                 stats_img = sc_cols[1].find("img", title="Estadística")
                 if stats_img and stats_img.find_parent("a"):
-                    match_id = stats_img.find_parent("a")["href"].strip("/").split("/")[-1]
+                    match_id = (
+                        stats_img.find_parent("a")["href"].strip("/").split("/")[-1]
+                    )
 
             matches.append(
                 MatchInfo(
@@ -240,7 +268,9 @@ def write_schedule_csv(matches: List[MatchInfo], group_id: str, out_dir: Path) -
 ###############################################################################
 
 
-def download_json_assets(matches: List[MatchInfo], season_id: str, out_root: Path) -> None:
+def download_json_assets(
+    matches: List[MatchInfo], season_id: str, out_root: Path
+) -> None:
     moves_dir = out_root / "match_moves"
     stats_dir = out_root / "match_stats"
     team_dir = out_root / "team_stats"
@@ -276,7 +306,12 @@ def download_json_assets(matches: List[MatchInfo], season_id: str, out_root: Pat
                 team_dir / f"team_{tid}_season_{season_id}.json",
             )
         except requests.exceptions.RequestException as e:
-            log.warning("Failed to download team stats for team %s, season %s: %s", tid, season_id, e)
+            log.warning(
+                "Failed to download team stats for team %s, season %s: %s",
+                tid,
+                season_id,
+                e,
+            )
 
     # player stats (requires team stats)
     player_uuid_team_map = {}
@@ -300,10 +335,16 @@ def download_json_assets(matches: List[MatchInfo], season_id: str, out_root: Pat
         try:
             save_json(
                 PLAYER_STATS_URL.format(player_uuid=uuid, team_id=team_id),
-                player_dir / f"player_{uuid}_team_{team_id}.json",  # Store with team id too
+                player_dir
+                / f"player_{uuid}_team_{team_id}.json",  # Store with team id too
             )
         except requests.exceptions.RequestException as e:
-            log.warning("Failed to download player stats for player %s (team %s): %s", uuid, team_id, e)
+            log.warning(
+                "Failed to download player stats for player %s (team %s): %s",
+                uuid,
+                team_id,
+                e,
+            )
 
 
 ###############################################################################
@@ -313,9 +354,13 @@ def download_json_assets(matches: List[MatchInfo], season_id: str, out_root: Pat
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch data from basquetcatala.cat")
-    parser.add_argument("--groups", nargs="+", required=True, help="Competition group IDs")
+    parser.add_argument(
+        "--groups", nargs="+", required=True, help="Competition group IDs"
+    )
     parser.add_argument("--mode", choices=["schedule", "all"], default="schedule")
-    parser.add_argument("--season", default="2024", help="Season id for team/player stats")
+    parser.add_argument(
+        "--season", default="2024", help="Season id for team/player stats"
+    )
     parser.add_argument("--output", default="data", help="Output directory")
     args = parser.parse_args()
 
