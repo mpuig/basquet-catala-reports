@@ -191,6 +191,9 @@ class StatsCalculator:
             lambda: {"secs": 0.0, "pts_for": 0, "pts_against": 0}
         )
         self.plus_minus: Dict[str, int] = defaultdict(int)  # +/- por jugadora
+        # --- Game-level summary ---
+        self.game_summaries: List[dict] = [] # Store {'game_idx': int, 'opponent_pts': int}
+        self.processed_matches: set[str] = set() # Track processed match IDs for summaries
 
     # ------------------------------------------------------------------
     # Public API
@@ -300,6 +303,7 @@ class StatsCalculator:
         per_game_points: Dict[str, int] = defaultdict(int)
         per_game_plusminus: Dict[str, int] = defaultdict(int)
         per_game_on_pts_a: Dict[str, int] = defaultdict(int)  # Added for per-game DRtg
+        game_opponent_pts: int = 0 # Total opponent points in this game
         current_lineup_tuple: tuple | None = None  # Track lineup for event attribution
         player_state: Dict[str, Dict] = {}
         on_court: Set[str] = set()
@@ -365,6 +369,7 @@ class StatsCalculator:
                         self.on_pts_f[p] += pts
                 else:
                     self.team_pts_a += pts
+                    game_opponent_pts += pts # Accumulate opponent points for the game
                     for p in on_court:
                         self.on_pts_a[p] += pts
                         per_game_on_pts_a[p] += pts
@@ -472,32 +477,44 @@ class StatsCalculator:
                     self._credit_pairwise_secs(p, other_player, duration)
 
         # Increment GP for players who participated in this game
-        if player_state:  # Only increment if the target team played and had events
-            for player_name in player_state:
-                self.players[player_name].gp += 1
+        for player_name in player_state:
+            self.players[player_name].gp += 1
+
+        # ---- save game summary (opponent points) --------------------------------
+        # Calculate game_idx just once before potentially adding to summaries/logs
+        # Avoid division by zero if player_state is empty for this team in this game
+        if player_state:
+             game_idx = len(self.game_summaries) + 1 # Simple increment based on processed games
+             # Add summary if match hasn't been processed before (prevent duplicates if called multiple times)
+             if match_id not in self.processed_matches:
+                 self.game_summaries.append({
+                     'game_idx': game_idx,
+                     'opponent_pts': game_opponent_pts
+                 })
+                 self.processed_matches.add(match_id)
+        else:
+            game_idx = None # No game index if no players/actions for target team
 
         # ---- save per‑player game row -------------------------------------------
-        game_idx = (
-            len(self.game_log) // len(player_state) + 1 if player_state else 1
-        )  # Avoid division by zero if no players
-        for pname, secs in per_game_minutes.items():
-            if pname in self.players:  # Only log if player is tracked
-                self.game_log.append(
-                    {
-                        "game_idx": game_idx,
-                        "player": pname,
-                        "mins": round(secs / 60, 1),
-                        "pts": per_game_points.get(pname, 0),
-                        "+/-": per_game_plusminus.get(pname, 0),
-                        "drtg": (
-                            round(
-                                (per_game_on_pts_a.get(pname, 0) * 40 / (secs / 60)), 1
-                            )
-                            if secs >= 60
-                            else None
-                        ),
-                    }
-                )
+        if game_idx is not None: # Only log if game_idx was assigned (i.e., target team played)
+            for pname, secs in per_game_minutes.items():
+                if pname in self.players:  # Only log if player is tracked
+                    self.game_log.append(
+                        {
+                            "game_idx": game_idx,
+                            "player": pname,
+                            "mins": round(secs / 60, 1),
+                            "pts": per_game_points.get(pname, 0),
+                            "+/-": per_game_plusminus.get(pname, 0),
+                            "drtg": (
+                                round(
+                                    (per_game_on_pts_a.get(pname, 0) * 40 / (secs / 60)), 1
+                                )
+                                if secs >= 60
+                                else None
+                            ),
+                        }
+                    )
 
         return True  # Indicate successful processing
 
@@ -573,7 +590,7 @@ class StatsCalculator:
 
             records.append(
                 {
-                    "lineup": "- ".join(map(shorten_name, lu)),
+                    "lineup": '\n'.join(map(shorten_name, lu)),
                     "mins": round(v["secs"] / 60, 1),
                     "usage_%": round(usage_percent, 1),
                     "NetRtg": round(net, 1),
@@ -751,6 +768,12 @@ def main() -> None:
     stats_dir = data_dir / "match_stats"
     team_stats_dir = data_dir / "team_stats"  # Directory for team stats
 
+    # Mapping from Group ID to descriptive name
+    GROUP_ID_TO_NAME = {
+        "17182": "Infantil 1r Any - Fase 1",
+        "18299": "Infantil 1r Any - Fase 2"
+    }
+
     # --- Try to load team info for headers ---
     team_name_for_header = args.team  # Default to ID
     names_to_exclude = set()  # Initialize empty set for names
@@ -847,9 +870,10 @@ def main() -> None:
         # --- Process Multiple Groups Separately ---
         group_results = {}
         for gid in args.groups:
-            # Use loaded team name, but specific group ID (gid) for clarity
+            # Use descriptive group name if available, otherwise use ID
+            group_name = GROUP_ID_TO_NAME.get(gid, f"Group {gid}")
             print(
-                f"\n{'=' * 15} Processing Group ID: {gid} | Team: {team_name_for_header} ({args.team}) {'=' * 15}"
+                f"\n{'=' * 15} Processing Group: {group_name} ({gid}) | Team: {team_name_for_header} ({args.team}) {'=' * 15}"
             )
             csv_path = data_dir / f"results_{gid}.csv"
 
@@ -922,6 +946,7 @@ def main() -> None:
                 "onoff_df": calc.on_off_table(names_to_exclude=names_to_exclude),
                 "lineup_df": calc.lineup_table(names_to_exclude=names_to_exclude),
                 "player_df": calc.player_table(names_to_exclude=names_to_exclude),
+                "group_name": group_name # Store descriptive name
             }
 
             # Display results *for this group*
@@ -933,23 +958,25 @@ def main() -> None:
 
             evo_table = calc.evolution_table(names_to_exclude=names_to_exclude)
             plot_evolution(
-                evo_table, gid, plot_output_dir, names_to_exclude=names_to_exclude
+                evo_table, group_name, gid, plot_output_dir, names_to_exclude=names_to_exclude
             )
 
             pairwise_df = calc.pairwise_minutes(names_to_exclude=names_to_exclude)
-            plot_pairwise_heatmap(pairwise_df, gid, plot_output_dir)
+            plot_pairwise_heatmap(pairwise_df, group_name, gid, plot_output_dir)
 
-            plot_minutes_stacked(evo_table, gid, plot_output_dir)  # Uses evo_table
+            # Prepare game summary data for the new plot
+            game_summary_df = pd.DataFrame(calc.game_summaries)
+            plot_stacked_points_vs_opponent(evo_table, game_summary_df, group_name, gid, plot_output_dir, names_to_exclude)
 
             onoff_df = calc.on_off_table(names_to_exclude=names_to_exclude)
-            plot_player_on_net(onoff_df, gid, plot_output_dir)
+            plot_player_on_net(onoff_df, group_name, gid, plot_output_dir)
 
             lineup_df = calc.lineup_table(names_to_exclude=names_to_exclude)
-            plot_lineup_netrtg(lineup_df, gid, plot_output_dir)
+            plot_lineup_netrtg(lineup_df, group_name, gid, plot_output_dir)
             # --- End Plots ---
 
             print(
-                f"\n{'=' * 15} Finished Group: {gid} {'=' * 15}"
+                f"\n{'=' * 15} Finished Group: {group_name} ({gid}) {'=' * 15}"
             )  # Mark end of group output
 
         # --- END GROUP LOOP ---
@@ -957,6 +984,10 @@ def main() -> None:
         # --- Generate Comparison Radar Chart (if applicable) ---
         if args.compare_player and len(args.groups) == 2:
             group_ids = args.groups
+            # Get descriptive names from stored results
+            g1_name = group_results[group_ids[0]].get('group_name', f"Group {group_ids[0]}")
+            g2_name = group_results[group_ids[1]].get('group_name', f"Group {group_ids[1]}")
+
             player_name = args.compare_player  # Use the name provided directly
             if player_name in names_to_exclude:
                 logger.warning(
@@ -964,13 +995,11 @@ def main() -> None:
                 )
             else:
                 logger.info(
-                    f"Attempting to generate comparison radar chart for player: {player_name} between groups {group_ids[0]} and {group_ids[1]}"
+                    f"Attempting to generate comparison radar chart for player: {player_name} between groups {g1_name} and {g2_name}"
                 )
                 plot_output_dir = Path(args.plot_dir)
-                # Pass the whole results dict for flexibility
-                plot_player_comparison_radar(
-                    group_results, player_name, plot_output_dir
-                )
+                # Pass the whole results dict, group names, and group ids
+                plot_player_comparison_radar(group_results, player_name, [g1_name, g2_name], group_ids, plot_output_dir)
         elif args.compare_player:
             logger.warning(
                 "Radar chart comparison requires exactly two group IDs to be provided."
@@ -1033,7 +1062,8 @@ def print_results(calc: "StatsCalculator", names_to_exclude: set[str]):
 
 def plot_evolution(
     evo_df: pd.DataFrame,
-    group_id: str,
+    group_name: str,
+    gid: str,
     plot_dir: Path,
     names_to_exclude: set[str] = set(),
 ):
@@ -1044,7 +1074,7 @@ def plot_evolution(
     if filtered_evo_df.empty:
         logger.info(
             "Evolution DataFrame is empty after exclusions, skipping plots for group %s.",
-            group_id,
+            group_name,
         )
         return
 
@@ -1065,9 +1095,13 @@ def plot_evolution(
         value_name="Points",
     )
 
+    # Apply shortening to the player column for plot labels/titles
+    df_melt_mins['player'] = df_melt_mins['player'].apply(shorten_name)
+    df_melt_pts['player'] = df_melt_pts['player'].apply(shorten_name)
+
     # --- Plot Minutes ---
     try:
-        logger.info("Generating Minutes evolution plot for group %s...", group_id)
+        logger.info("Generating Minutes evolution plot for group %s...", group_name)
         sns.set_theme(style="ticks")
         g_mins = sns.relplot(
             data=df_melt_mins,
@@ -1084,20 +1118,23 @@ def plot_evolution(
         )
         g_mins.set_titles("{col_name}")
         g_mins.set_axis_labels("Game Index", "Minutes")
-        g_mins.figure.suptitle(f"Minutes Evolution - Group {group_id}", y=1.03)
-        plot_path_mins = plot_dir / f"evolution_minutes_group_{group_id}.png"
+        g_mins.figure.suptitle(f"Minutes Evolution - Group {group_name}", y=1.03)
+        plot_path_mins = plot_dir / f"evolution_minutes_group_{gid}.png" # Use gid
+        mins_desc = "Shows minutes played per game (line) and 3-game rolling average (dashed) for each player."
+        g_mins.figure.text(0.5, 0.01, mins_desc, ha='center', va='bottom', fontsize=10, wrap=True)
+        g_mins.figure.subplots_adjust(bottom=0.15) # Adjust bottom margin for description
         g_mins.savefig(plot_path_mins, dpi=150)
-        plt.close(g_mins.figure)  # Close figure to free memory
+        plt.close(g_mins.figure)
     except Exception as e:
         logger.error(
-            "Failed to generate/save minutes plot for group %s: %s", group_id, e
+            "Failed to generate/save minutes plot for group %s: %s", group_name, e
         )
         if "g_mins" in locals() and hasattr(g_mins, "figure"):
             plt.close(g_mins.figure)  # Attempt to close if figure exists
 
     # --- Plot Points ---
     try:
-        logger.info("Generating Points evolution plot for group %s...", group_id)
+        logger.info("Generating Points evolution plot for group %s...", group_name)
         sns.set_theme(style="ticks")
         g_pts = sns.relplot(
             data=df_melt_pts,
@@ -1114,13 +1151,16 @@ def plot_evolution(
         )
         g_pts.set_titles("{col_name}")
         g_pts.set_axis_labels("Game Index", "Points")
-        g_pts.figure.suptitle(f"Points Evolution - Group {group_id}", y=1.03)
-        plot_path_pts = plot_dir / f"evolution_points_group_{group_id}.png"
+        g_pts.figure.suptitle(f"Points Evolution - Group {group_name}", y=1.03)
+        plot_path_pts = plot_dir / f"evolution_points_group_{gid}.png" # Use gid
+        pts_desc = "Shows points scored per game (line) and 3-game rolling average (dashed) for each player."
+        g_pts.figure.text(0.5, 0.01, pts_desc, ha='center', va='bottom', fontsize=10, wrap=True)
+        g_pts.figure.subplots_adjust(bottom=0.15) # Adjust bottom margin
         g_pts.savefig(plot_path_pts, dpi=150)
-        plt.close(g_pts.figure)  # Close figure
+        plt.close(g_pts.figure)
     except Exception as e:
         logger.error(
-            "Failed to generate/save points plot for group %s: %s", group_id, e
+            "Failed to generate/save points plot for group %s: %s", group_name, e
         )
         if "g_pts" in locals() and hasattr(g_pts, "figure"):
             plt.close(g_pts.figure)
@@ -1128,13 +1168,15 @@ def plot_evolution(
     # --- Plot DRtg ---
     try:
         if "roll_drtg" in filtered_evo_df.columns:
-            logger.info("Generating DRtg evolution plot for group %s...", group_id)
+            logger.info("Generating DRtg evolution plot for group %s...", group_name)
             df_melt_drtg = filtered_evo_df.melt(
                 id_vars=["game_idx", "player"],
                 value_vars=["drtg", "roll_drtg"],
                 var_name="Metric_Type",
                 value_name="DRtg",
             )
+            # Apply shortening here too
+            df_melt_drtg['player'] = df_melt_drtg['player'].apply(shorten_name)
             sns.set_theme(style="ticks")
             g_drtg = sns.relplot(
                 data=df_melt_drtg,
@@ -1154,110 +1196,162 @@ def plot_evolution(
             for ax in g_drtg.axes.flat:
                 ax.invert_yaxis()  # Lower DRtg is better
             g_drtg.figure.suptitle(
-                f"Defensive Rating Evolution - Group {group_id}", y=1.03
+                f"Defensive Rating Evolution - Group {group_name}", y=1.03
             )
-            plot_path_drtg = plot_dir / f"evolution_drtg_group_{group_id}.png"
+            plot_path_drtg = plot_dir / f"evolution_drtg_group_{gid}.png" # Use gid
+            drtg_desc = "Shows Defensive Rating (pts allowed per 40 min while on court) per game (line) and rolling average (dashed). Lower is better."
+            g_drtg.figure.text(0.5, 0.01, drtg_desc, ha='center', va='bottom', fontsize=10, wrap=True)
+            g_drtg.figure.subplots_adjust(bottom=0.15) # Adjust bottom margin
             g_drtg.savefig(plot_path_drtg, dpi=150)
             plt.close(g_drtg.figure)
     except Exception as e:
-        logger.error("Failed to generate/save DRtg plot for group %s: %s", group_id, e)
+        logger.error("Failed to generate/save DRtg plot for group %s: %s", group_name, e)
         if "g_drtg" in locals() and hasattr(g_drtg, "figure"):
             plt.close(g_drtg.figure)
 
 
 # --- Plotting Function: Pairwise Heatmap ---
-def plot_pairwise_heatmap(pairwise_df: pd.DataFrame, group_id: str, plot_dir: Path):
+def plot_pairwise_heatmap(pairwise_df: pd.DataFrame, group_name: str, gid: str, plot_dir: Path):
     """Generates and saves a heatmap for pairwise minutes."""
     if pairwise_df.empty:
         logger.info(
-            "Pairwise DataFrame is empty, skipping heatmap for group %s.", group_id
+            "Pairwise DataFrame is empty, skipping heatmap for group %s.", group_name
         )
         return
     if pairwise_df.shape[0] < 2 or pairwise_df.shape[1] < 2:
-        logger.info("Insufficient players for pairwise heatmap for group %s.", group_id)
+        logger.info("Insufficient players for pairwise heatmap for group %s.", group_name)
         return
 
     plot_dir.mkdir(parents=True, exist_ok=True)
-    filename = plot_dir / f"heatmap_pairwise_minutes_group_{group_id}.png"
+    filename = plot_dir / f"heatmap_pairwise_minutes_group_{gid}.png"
 
     try:
         plt.figure(figsize=(10, 8))  # Adjust size as needed
-        sns.heatmap(pairwise_df, annot=True, fmt="d", cmap="viridis", linewidths=0.5)
-        plt.title(f"Pairwise Minutes Played Together - Group {group_id}")
+        sns.heatmap(pairwise_df, annot=True, fmt="d", linewidths=0.5)
+        plt.title(f"Pairwise Minutes Played Together - Group {group_name}")
         plt.xticks(rotation=45, ha="right")
         plt.yticks(rotation=0)
-        plt.tight_layout()  # Adjust layout to prevent labels overlapping
+        heatmap_desc = "Heatmap showing total minutes pairs of players spent on the court together. Darker/more intense colors indicate more time played together."
+        plt.figtext(0.5, 0.01, heatmap_desc, ha='center', va='bottom', fontsize=10, wrap=True)
+        plt.subplots_adjust(bottom=0.15) # Adjust margin for description
         plt.savefig(filename, dpi=150)
         plt.close()
     except Exception as e:
         logger.error(
-            "Failed to generate/save pairwise heatmap for group %s: %s", group_id, e
+            "Failed to generate/save pairwise heatmap for group %s: %s", group_name, e
         )
         plt.close()  # Attempt to close figure on error
 
 
-# --- Plotting Function: Stacked Minutes Bar Chart ---
-def plot_minutes_stacked(evo_df: pd.DataFrame, group_id: str, plot_dir: Path):
-    """Generates and saves a stacked bar chart of minutes per player per game."""
-    if evo_df.empty:
+# --- Plotting Function: Stacked Points vs Opponent Points Bar Chart ---
+def plot_stacked_points_vs_opponent(evo_df: pd.DataFrame, game_summary_df: pd.DataFrame, group_name: str, gid: str, plot_dir: Path, names_to_exclude: set[str] = set()):
+    """Generates and saves a grouped bar chart: stacked points per player and opponent points per game."""
+    # Filter player evolution data first
+    filtered_evo_df = evo_df[~evo_df["player"].isin(names_to_exclude)]
+
+    if filtered_evo_df.empty:
         logger.info(
-            "Evolution DataFrame is empty, skipping stacked minutes plot for group %s.",
-            group_id,
+            "Evolution DataFrame empty after exclusions, skipping stacked points plot for group %s.",
+            group_name,
         )
         return
 
-    # Pivot the table for stacked bar chart: games as index, players as columns, minutes as values
+    if game_summary_df.empty:
+        logger.info(
+            "Game summary DataFrame is empty, skipping stacked points plot for group %s.",
+            group_name,
+        )
+        return
+
+    # Pivot the table for stacked bar chart: games as index, players as columns, POINTS as values
     try:
-        minutes_pivot = evo_df.pivot_table(
-            index="game_idx", columns="player", values="mins", aggfunc="sum"
+        points_pivot = filtered_evo_df.pivot_table(
+            index="game_idx", columns="player", values="pts", aggfunc="sum"
         ).fillna(0)
+        # Apply name shortening to columns for better display in legend
+        points_pivot.columns = points_pivot.columns.map(shorten_name)
+        # Sort columns alphabetically for consistent legend order
+        points_pivot = points_pivot.reindex(sorted(points_pivot.columns), axis=1)
+
     except Exception as e:
         logger.error(
-            "Failed to pivot evolution data for stacked minutes plot for group %s: %s",
-            group_id,
+            "Failed to pivot evolution data for stacked points plot for group %s: %s",
+            group_name,
             e,
         )
         return
 
-    if minutes_pivot.empty:
-        logger.info(
-            "Pivoted minutes data is empty, skipping stacked minutes plot for group %s.",
-            group_id,
-        )
+    # Prepare opponent points data
+    opponent_points = game_summary_df.set_index('game_idx')['opponent_pts']
+
+    # Align data - crucial step! Use intersection of indices
+    common_indices = points_pivot.index.intersection(opponent_points.index)
+    if common_indices.empty:
+        logger.warning("No common game indices between player points and opponent points data for group %s.", group_name)
         return
 
+    points_pivot = points_pivot.loc[common_indices]
+    opponent_points = opponent_points.loc[common_indices]
+
+    # Use the index from the pivoted minutes table directly
+    game_indices = points_pivot.index
+
     plot_dir.mkdir(parents=True, exist_ok=True)
-    filename = plot_dir / f"stacked_minutes_per_game_group_{group_id}.png"
+    filename = plot_dir / f"bars_stacked_points_vs_opponent_group_{gid}.png"
 
     try:
-        # Apply name shortening to columns for better display
-        minutes_pivot.columns = minutes_pivot.columns.map(shorten_name)
-        # Sort columns alphabetically for consistent legend order
-        minutes_pivot = minutes_pivot.reindex(sorted(minutes_pivot.columns), axis=1)
+        n_games = len(game_indices)
+        x = np.arange(n_games)  # the label locations
+        width = 0.35  # Width for grouped bars
 
-        plt.title(f"Minutes Played per Game - Group {group_id}")
-        plt.xlabel("Game Index")
-        plt.ylabel("Minutes Played")
-        plt.xticks(rotation=0)  # Keep game index horizontal
-        # Place legend outside the plot
-        plt.legend(title="Player", bbox_to_anchor=(1.04, 1), loc="upper left")
-        plt.tight_layout(rect=[0, 0, 0.85, 1])  # Adjust layout to make space for legend
+        fig, ax = plt.subplots(figsize=(max(14, n_games * 0.8), 7)) # Dynamic width
+
+        # --- Plot Stacked Player Points Bar --- (at x - width/2)
+        bottom = np.zeros(n_games)
+        # Use a consistent color map
+        colors = plt.cm.tab20(np.linspace(0, 1, len(points_pivot.columns)))
+        for i, player in enumerate(points_pivot.columns):
+            ax.bar(x - width/2, points_pivot[player], width, label=player, bottom=bottom, color=colors[i])
+            bottom += points_pivot[player].values
+
+        # --- Plot Opponent Points Bar --- (at x + width/2)
+        ax.bar(x + width/2, opponent_points, width, label='Opponent Pts', color='#FF5733') # A distinct color
+
+        # Add some text for labels, title and axes ticks
+        ax.set_ylabel('Points')
+        ax.set_title(f'Player Points vs Opponent Points per Game - Group {group_name}')
+        ax.set_xticks(x)
+        ax.set_xticklabels(game_indices)
+        ax.tick_params(axis='x', rotation=0)
+
+        # --- Move Legend --- 
+        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), title="Player / Metric")
+
+        summary_desc = "Grouped bar chart per game. Left bar (stacked) shows points scored by each player. Right bar shows total points scored by the opponent."
+        plt.figtext(0.5, 0.01, summary_desc, ha='center', va='bottom', fontsize=10, wrap=True)
+
+        # Adjust layout to prevent legend/description overlap
+        plt.tight_layout(rect=[0, 0.03, 0.85, 1]) # Leave space on right for legend and bottom for text
+
         plt.savefig(filename, dpi=150)
-        plt.close()
+        plt.close(fig)
+        logger.info(f"-> Saved Stacked Points vs Opponent Chart: {filename}")
+
     except Exception as e:
         logger.error(
-            "Failed to generate/save stacked minutes plot for group %s: %s", group_id, e
+            "Failed to generate/save stacked points plot for group %s: %s", group_name, e
         )
-        plt.close()
+        if 'fig' in locals():
+            plt.close(fig)
 
 
 # --- Plotting Function: Player On_Net Bar Chart ---
-def plot_player_on_net(onoff_df: pd.DataFrame, group_id: str, plot_dir: Path):
+def plot_player_on_net(onoff_df: pd.DataFrame, group_name: str, gid: str, plot_dir: Path):
     """Generates and saves a bar chart for Player On_Net rating."""
     if onoff_df.empty or "On_Net" not in onoff_df.columns:
         logger.info(
             "On/Off DataFrame is empty or missing 'On_Net', skipping plot for group %s.",
-            group_id,
+            group_name,
         )
         return
 
@@ -1268,7 +1362,7 @@ def plot_player_on_net(onoff_df: pd.DataFrame, group_id: str, plot_dir: Path):
     if onoff_df.empty:
         logger.info(
             "No valid numeric 'On_Net' data found, skipping plot for group %s.",
-            group_id,
+            group_name,
         )
         return
 
@@ -1276,7 +1370,7 @@ def plot_player_on_net(onoff_df: pd.DataFrame, group_id: str, plot_dir: Path):
     onoff_df_sorted = onoff_df.sort_values("On_Net", ascending=False)
 
     plot_dir.mkdir(parents=True, exist_ok=True)
-    filename = plot_dir / f"barchart_player_on_net_group_{group_id}.png"
+    filename = plot_dir / f"barchart_player_on_net_group_{gid}.png"
 
     try:
         plt.figure(figsize=(10, 6))
@@ -1300,27 +1394,28 @@ def plot_player_on_net(onoff_df: pd.DataFrame, group_id: str, plot_dir: Path):
                 va="bottom" if row.On_Net >= 0 else "top",
             )
 
-        plt.title(f"Player On-Court Net Rating (per 40 min) - Group {group_id}")
+        plt.title(f"Player On-Court Net Rating (per 40 min) - Group {group_name}")
         plt.xlabel("Player")
         plt.ylabel("On_Net Rating")
         plt.xticks(rotation=45, ha="right")
-        plt.tight_layout()
+        onnet_desc = "Bar chart comparing each player's On-Court Net Rating (team point differential per 40 minutes while the player was on the court). Positive bars indicate the team outscored opponents during the player's minutes."
+        plt.figtext(0.5, 0.01, onnet_desc, ha='center', va='bottom', fontsize=10, wrap=True)
+        plt.subplots_adjust(bottom=0.25) # Adjust margin for description + rotated labels
         plt.savefig(filename, dpi=150)
-        plt.close()
     except Exception as e:
         logger.error(
-            "Failed to generate/save player On_Net plot for group %s: %s", group_id, e
+            "Failed to generate/save player On_Net plot for group %s: %s", group_name, e
         )
         plt.close()
 
 
 # --- Plotting Function: Lineup NetRtg Bar Chart ---
-def plot_lineup_netrtg(lineup_df: pd.DataFrame, group_id: str, plot_dir: Path):
+def plot_lineup_netrtg(lineup_df: pd.DataFrame, group_name: str, gid: str, plot_dir: Path):
     """Generates and saves a bar chart for Lineup NetRtg."""
     if lineup_df.empty or "NetRtg" not in lineup_df.columns:
         logger.info(
             "Lineup DataFrame is empty or missing 'NetRtg', skipping plot for group %s.",
-            group_id,
+            group_name,
         )
         return
 
@@ -1331,19 +1426,18 @@ def plot_lineup_netrtg(lineup_df: pd.DataFrame, group_id: str, plot_dir: Path):
     if lineup_df.empty:
         logger.info(
             "No valid numeric 'NetRtg' data found for lineups, skipping plot for group %s.",
-            group_id,
+            group_name,
         )
         return
 
-    # Sort by NetRtg and take top N (e.g., top 15) for readability
     top_n = 15
     lineup_df_sorted = lineup_df.sort_values("NetRtg", ascending=False).head(top_n)
 
     plot_dir.mkdir(parents=True, exist_ok=True)
-    filename = plot_dir / f"barchart_lineup_netrtg_group_{group_id}.png"
+    filename = plot_dir / f"barchart_lineup_netrtg_group_{gid}.png"
 
     try:
-        plt.figure(figsize=(12, 7))  # Wider figure for lineup names
+        plt.figure(figsize=(14, 7))  # Increased width
         barplot = sns.barplot(
             x="lineup",
             y="NetRtg",
@@ -1362,29 +1456,41 @@ def plot_lineup_netrtg(lineup_df: pd.DataFrame, group_id: str, plot_dir: Path):
                 ha="center",
                 va="bottom" if row.NetRtg >= 0 else "top",
             )
-        plt.title(f"Top {top_n} Lineup Net Rating (per 40 min) - Group {group_id}")
-        plt.xlabel("Lineup (Shortened Names)")
+        plt.title(f"Top {top_n} Lineup Net Rating (per 40 min) - Group {group_name}")
+        plt.xlabel("Lineup")
         plt.ylabel("Net Rating")
-        plt.xticks(rotation=75, ha="right")  # Rotate more for long lineup names
-        plt.tight_layout(rect=[0, 0, 1, 1])
+        plt.xticks(rotation=0, ha="center")  # Horizontal and centered labels
+        plt.subplots_adjust(bottom=0.30) # Explicitly set bottom margin
+        plt.tight_layout() # Apply tight_layout *after* subplots_adjust
+        lineup_desc = f"Shows the point differential per 40 minutes (Net Rating) for the top {top_n} lineups. Higher bars indicate lineups that outscored opponents. Player names are listed below each bar."
+        plt.figtext(0.5, 0.01, lineup_desc, ha='center', va='bottom', fontsize=10, wrap=True)
+        plt.subplots_adjust(bottom=0.35) # Increase bottom margin further for multi-line labels + description
         plt.savefig(filename, dpi=150)
-        plt.close()
+        logger.info(f"-> Saved Lineup NetRtg Bar Chart: {filename}")
     except Exception as e:
         logger.error(
-            "Failed to generate/save lineup NetRtg plot for group %s: %s", group_id, e
+            "Failed to generate/save lineup NetRtg plot for group %s: %s", group_name, e
         )
         plt.close()
 
 
 # --- Plotting Function: Player Comparison Radar Chart ---
-def plot_player_comparison_radar(group_results: dict, player_name: str, plot_dir: Path):
+def plot_player_comparison_radar(group_results: dict, player_name: str, group_names: list, group_ids: list, plot_dir: Path):
     """Generates a radar chart comparing a player's stats between two groups."""
-    group_ids = list(group_results.keys())
-    if len(group_ids) != 2:
+    if len(group_names) != 2:
         logger.error("Radar plot function called with incorrect number of groups.")
         return
 
-    g1_id, g2_id = group_ids[0], group_ids[1]
+    # Use descriptive names passed in
+    g1_name, g2_name = group_names[0], group_names[1]
+    # Find the original group IDs from the keys of group_results based on the names
+    g1_id = next((gid for gid, data in group_results.items() if data.get('group_name') == g1_name), None)
+    g2_id = next((gid for gid, data in group_results.items() if data.get('group_name') == g2_name), None)
+
+    if not g1_id or not g2_id:
+        logger.error("Could not map provided group names back to group IDs in results.")
+        return
+
     g1_data = group_results[g1_id]
     g2_data = group_results[g2_id]
 
@@ -1402,10 +1508,10 @@ def plot_player_comparison_radar(group_results: dict, player_name: str, plot_dir
         )
         # REMOVED Debug note comment
         logger.debug(
-            f"Group {g1_id} players: {g1_data['player_df']['Player'].tolist()}"
+            f"Group {g1_name} players: {g1_data['player_df']['Player'].tolist()}"
         )
         logger.debug(
-            f"Group {g2_id} players: {g2_data['player_df']['Player'].tolist()}"
+            f"Group {g2_name} players: {g2_data['player_df']['Player'].tolist()}"
         )
         return
     except KeyError as e:
@@ -1489,7 +1595,7 @@ def plot_player_comparison_radar(group_results: dict, player_name: str, plot_dir
         norm_values1,
         linewidth=2,
         linestyle="solid",
-        label=f"Group {g1_id}",
+        label=g1_name, # Use group name for label
         color="skyblue",
     )
     ax.fill(angles, norm_values1, "skyblue", alpha=0.4)
@@ -1498,7 +1604,7 @@ def plot_player_comparison_radar(group_results: dict, player_name: str, plot_dir
         norm_values2,
         linewidth=2,
         linestyle="solid",
-        label=f"Group {g2_id}",
+        label=g2_name, # Use group name for label
         color="lightcoral",
     )
     ax.fill(angles, norm_values2, "lightcoral", alpha=0.4)
@@ -1511,11 +1617,16 @@ def plot_player_comparison_radar(group_results: dict, player_name: str, plot_dir
 
     # Save plot
     plot_dir.mkdir(parents=True, exist_ok=True)
+    safe_g1_name = "".join(c if c.isalnum() else '_' for c in g1_name)
+    safe_g2_name = "".join(c if c.isalnum() else '_' for c in g2_name)
     filename = (
         plot_dir
-        / f"radar_compare_{player_name.replace(' ', '_')}_groups_{g1_id}_{g2_id}.png"
+        / f"radar_compare_{player_name.replace(' ', '_')}_groups_{safe_g1_name}_vs_{safe_g2_name}.png"
     )
     try:
+        radar_desc = "Compares selected player stats (normalized per GP) between the two phases. Values closer to the edge are better relative to the max observed for that stat."
+        plt.figtext(0.5, 0.01, radar_desc, ha='center', va='bottom', fontsize=10, wrap=True)
+        plt.subplots_adjust(bottom=0.1) # Adjust bottom slightly for text
         plt.savefig(filename, dpi=150, bbox_inches="tight")
         plt.close(fig)
         logger.info(f"-> Saved Player Comparison Radar Chart: {filename}")
