@@ -462,9 +462,7 @@ class StatsCalculator:
                     pa.t1 += 1
                     pa.pts += 1
                     per_game_points[actor_name] += 1
-                elif event_type.startswith(
-                    "Personal"
-                ):
+                elif event_type.startswith("Personal"):
                     pa.fouls += 1
 
                 # --- Handle Minutes Played & Pairwise ---
@@ -552,7 +550,7 @@ class StatsCalculator:
                                         * 40
                                         / (secs / 60)
                                     ),
-                                    1
+                                    1,
                                 )
                                 if secs >= 60
                                 else None
@@ -772,7 +770,7 @@ class StatsCalculator:
             rows.append(
                 {
                     "Player": shorten_name(player),
-                    "Mins_ON": round(mins_on, 2),  # Changed rounding
+                    "Mins_ON": round(mins_on, 2),
                     "On_Net": round(on_net, 1),
                     "Off_Net": round(off_net, 1) if off_net is not None else "—",
                     "ON-OFF": round(diff, 1) if diff is not None else "—",
@@ -1568,7 +1566,9 @@ def plot_lineup_netrtg(
     lineup_df_plot = lineup_df.sort_values("NetRtg", ascending=False).head(top_n).copy()
 
     # Replace hyphens with newlines *specifically for plot labels*
-    lineup_df_plot['lineup'] = lineup_df_plot['lineup'].str.replace(' - ', '\n', regex=False)
+    lineup_df_plot["lineup"] = lineup_df_plot["lineup"].str.replace(
+        " - ", "\n", regex=False
+    )
 
     if lineup_df_plot.empty:
         logger.info(f"No lineup data to plot for group {group_name} after filtering.")
@@ -1580,15 +1580,15 @@ def plot_lineup_netrtg(
     try:
         plt.figure(figsize=(14, 7))  # Increased width
         barplot = sns.barplot(
-            x="lineup", # This now has newlines
+            x="lineup",  # This now has newlines
             y="NetRtg",
-            hue="lineup", # Use hue for consistency, but legend=False
+            hue="lineup",  # Use hue for consistency, but legend=False
             data=lineup_df_plot,
             palette="viridis",
             legend=False,
         )
         # Add value labels
-        for index, row in lineup_df_plot.iterrows(): # Iterate plot-specific df
+        for index, row in lineup_df_plot.iterrows():  # Iterate plot-specific df
             # Use numerical index for positioning text on barplot
             numerical_index = lineup_df_plot.index.get_loc(index)
             barplot.text(
@@ -1599,7 +1599,9 @@ def plot_lineup_netrtg(
                 ha="center",
                 va="bottom" if row.NetRtg >= 0 else "top",
             )
-        plt.title(f"Top {len(lineup_df_plot)} Lineup Net Rating (per 40 min) - Group {group_name}")
+        plt.title(
+            f"Top {len(lineup_df_plot)} Lineup Net Rating (per 40 min) - Group {group_name}"
+        )
         plt.xlabel("Lineup")
         plt.ylabel("Net Rating")
         plt.xticks(rotation=0, ha="center")  # Horizontal and centered labels

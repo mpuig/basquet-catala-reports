@@ -803,7 +803,9 @@ class StatsCalculator:
             rows.append(
                 {
                     "Player": shorten_name(player),
-                    "Mins_ON": round(mins_on, 2),  # Changed rounding to 2 decimal places
+                    "Mins_ON": round(
+                        mins_on, 2
+                    ),
                     "On_Net": round(on_net, 1),
                     "Off_Net": round(off_net, 1) if off_net is not None else "—",
                     "ON-OFF": round(diff, 1) if diff is not None else "—",
@@ -1042,12 +1044,14 @@ def plot_lineup_netrtg(
         logger.info("No valid numeric 'NetRtg' data for lineups, skipping plot.")
         return None
 
-    top_n = 5  # Changed from 10 to 5
+    top_n = 5
     # Make a copy before modifying for plotting
     lineup_df_plot = lineup_df.sort_values("NetRtg", ascending=False).head(top_n).copy()
 
     # Replace hyphens with newlines *specifically for plot labels*
-    lineup_df_plot['lineup'] = lineup_df_plot['lineup'].str.replace(' - ', '\n', regex=False)
+    lineup_df_plot["lineup"] = lineup_df_plot["lineup"].str.replace(
+        " - ", "\n", regex=False
+    )
 
     if lineup_df_plot.empty:  # Check again after head(top_n)
         logger.info("No lineups found after filtering top N, skipping plot.")
