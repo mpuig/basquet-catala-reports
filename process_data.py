@@ -112,6 +112,22 @@ def load_match_moves(match_id: str, moves_dir: Path) -> List[dict]:
         return []
 
 
+def load_team_stats(team_id: str, season: str, team_stats_dir: Path) -> dict | None:
+    """Loads team statistics JSON for a given team and season."""
+    file_path = team_stats_dir / f"team_{team_id}_season_{season}.json"
+    if not file_path.exists():
+        logger.warning("Team stats file not found: %s", file_path)
+        return None
+    try:
+        return json.loads(file_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        logger.warning("Could not decode team stats JSON for %s/%s: %s", team_id, season, exc)
+        return None
+    except Exception as e:
+        logger.error("Error reading team stats file %s: %s", file_path, e)
+        return None
+
+
 def load_match_stats(match_id: str, stats_dir: Path) -> dict | None:
     """Loads and parses the aggregated match stats JSON data."""
     if not match_id or not isinstance(match_id, str) or len(match_id) < 5:
@@ -278,7 +294,9 @@ class StatsCalculator:
             last_event_abs_seconds = event_abs_seconds
             game_end_sec = max(game_end_sec, event_abs_seconds) # Keep track of game end time
 
-            if is_target_team_event and actor_name:
+            # Process only if it's a target team event, has an actor name,
+            # and the actor name is NOT the team name itself (i.e., ignore team actions like Timeouts)
+            if is_target_team_event and actor_name and actor_name != target_team_name:
                 # Ensure player is in our main tracker
                 if actor_name not in self.players:
                     self.players[actor_name] = PlayerAggregate(number=actor_num)
@@ -298,10 +316,10 @@ class StatsCalculator:
                 elif event_type in ["Cistella de 2", "Esmaixada"]:
                     pa.t2 += 1
                     pa.pts += 2
-                elif event_type == "Tir lliure convertit": # Free Throw Made
+                elif event_type == "Cistella de 1": # Correct event for FT made
                     pa.t1 += 1
                     pa.pts += 1
-                elif event_type == "Falta Personal":
+                elif event_type.startswith("Personal"): # Check if it starts with Personal
                     pa.fouls += 1
                 # Add other event types if needed (rebounds, assists, etc.)
 
@@ -429,15 +447,29 @@ def main() -> None:
         "--data-dir", default="data", help="Root data folder (CSV & JSON)"
     )
     parser.add_argument("--match", default=None, help="Optional: Process only a single match ID")
+    parser.add_argument("--season", default="2024", help="Season identifier (default: 2024)")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     moves_dir = data_dir / "match_moves"
-    stats_dir = data_dir / "match_stats" # Directory for aggregated stats
+    stats_dir = data_dir / "match_stats" 
+    team_stats_dir = data_dir / "team_stats" # Directory for team stats
 
+    # --- Try to load team info for headers --- 
+    team_name_for_header = args.team # Default to ID
+    group_name_for_header = "Unknown Group" # Default group name
+    team_stats_data = load_team_stats(args.team, args.season, team_stats_dir)
+    if team_stats_data and "team" in team_stats_data:
+        team_name_for_header = team_stats_data["team"].get("teamName", args.team)
+        group_name_for_header = team_stats_data["team"].get("categoryName", "Unknown Group")
+    # Use categoryName as group name if available, otherwise keep it generic
+    # The categoryName applies to the team/season, not necessarily the specific group ID being processed
+    # We will use the specific group ID (gid) in the loop header for clarity
+    
     if args.match:
         # --- Process Single Match --- 
-        logger.info(f"Processing single match ID: {args.match} for Team ID: {args.team}")
+        # (Header logic for single match might also use team_name_for_header)
+        logger.info(f"Processing single match ID: {args.match} for Team: {team_name_for_header} ({args.team})")
         match_found_in_schedule = False
         schedule_df_single = None
         moves_single = None
@@ -486,51 +518,55 @@ def main() -> None:
         print_results(calc)
 
     else:
-        # --- Process Multiple Groups (original logic, but adapted) ---
-        all_schedule_frames: list[pd.DataFrame] = []
-        all_moves_data: Dict[str, List[dict]] = {}
-        all_stats_data: Dict[str, dict] = {} # Store loaded match stats
-
+        # --- Process Multiple Groups Separately ---
         for gid in args.groups:
-            print(f"\n{'='*15} Loading Group: {gid} {'='*15}")
+            # Use loaded team name, but specific group ID (gid) for clarity
+            print(f"\n{'='*15} Processing Group ID: {gid} | Team: {team_name_for_header} ({args.team}) {'='*15}")
             csv_path = data_dir / f"results_{gid}.csv"
+            
+            # Data specific to this group
+            current_group_schedule = None
+            current_group_moves: Dict[str, List[dict]] = {}
+            current_group_stats: Dict[str, dict] = {}
+
             try:
                 schedule_df = load_schedule(csv_path)
-                all_schedule_frames.append(schedule_df)
-                # Pre-load moves and stats for all matches in this schedule
-                for mid in schedule_df["match_id"].dropna().astype(str).unique():
-                    if mid not in all_moves_data:
-                         loaded_moves = load_match_moves(mid, moves_dir)
-                         if loaded_moves:
-                             all_moves_data.setdefault(mid, loaded_moves)
-                    if mid not in all_stats_data:
-                        loaded_stats = load_match_stats(mid, stats_dir) # Load stats
-                        if loaded_stats:
-                            all_stats_data.setdefault(mid, loaded_stats)
+                current_group_schedule = schedule_df # Keep this group's schedule separate
+                
+                # Load moves and stats only for matches in this group's schedule
+                match_ids_in_group = schedule_df["match_id"].dropna().astype(str).unique()
+                logger.info(f"Loading JSON data for {len(match_ids_in_group)} matches in group {gid}...")
+                for mid in match_ids_in_group:
+                    loaded_moves = load_match_moves(mid, moves_dir)
+                    if loaded_moves:
+                        current_group_moves[mid] = loaded_moves
+                    loaded_stats = load_match_stats(mid, stats_dir)
+                    if loaded_stats:
+                        current_group_stats[mid] = loaded_stats
 
             except FileNotFoundError:
-                logger.error("Schedule file not found: %s", csv_path)
-                continue # Skip to next group if schedule is missing
+                logger.error("Schedule file not found: %s. Skipping group %s.", csv_path, gid)
+                continue 
             except ValueError as e:
-                logger.error("Error loading schedule %s: %s", csv_path, e)
+                logger.error("Error loading schedule %s: %s. Skipping group %s.", csv_path, e, gid)
                 continue
             except Exception as e:
-                 logger.error("Unexpected error processing schedule %s: %s", csv_path, e)
+                 logger.error("Unexpected error processing schedule %s: %s. Skipping group %s.", csv_path, e, gid)
                  continue
         
-        if not all_schedule_frames:
-            logger.error("No schedule data loaded successfully. Exiting.")
-            return
+            if current_group_schedule is None or current_group_schedule.empty:
+                 logger.warning(f"No schedule data loaded for group {gid}. Skipping processing.")
+                 continue
+                 
+            # Instantiate and process *for this group only*
+            logger.info(f"Calculating stats for group {gid}...")
+            calc = StatsCalculator(args.team) 
+            calc.process(current_group_schedule, current_group_moves, current_group_stats) 
 
-        # Combine all loaded schedule data
-        combined_schedule_df = pd.concat(all_schedule_frames, ignore_index=True)
-
-        print(f"\n{'='*15} Processing All Loaded Data | Team: {args.team} {'='*15}")
-        calc = StatsCalculator(args.team)
-        calc.process(combined_schedule_df, all_moves_data, all_stats_data) # Pass stats data
-
-        # Display results for the combined data
-        print_results(calc)
+            # Display results *for this group*
+            print_results(calc)
+            
+            print(f"\n{'='*15} Finished Group: {gid} {'='*15}") # Mark end of group output
 
 def print_results(calc: 'StatsCalculator'):
     """Helper function to print the standard output tables."""
