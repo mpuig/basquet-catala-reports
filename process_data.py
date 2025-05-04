@@ -186,6 +186,7 @@ class StatsCalculator:
                                                                               'pts_for': 0,
                                                                               'pts_against': 0})
         self.plus_minus: Dict[str, int] = defaultdict(int)  # +/- por jugadora
+        self.def_rating: Dict[str, float] = defaultdict(float)  # Defensive rating por jugadora
 
     # ------------------------------------------------------------------
     # Public API
@@ -277,6 +278,7 @@ class StatsCalculator:
         per_game_minutes: Dict[str, float] = defaultdict(float)
         per_game_points: Dict[str, int] = defaultdict(int)
         per_game_plusminus: Dict[str, int] = defaultdict(int)
+        per_game_on_pts_a: Dict[str, int] = defaultdict(int) # Added for per-game DRtg
         last_lineup_tuple: tuple | None = None
         current_lineup_tuple: tuple | None = None # Track lineup for event attribution
         # ... (Initialize player_state, on_court, current_period_start_sec etc.)
@@ -348,6 +350,7 @@ class StatsCalculator:
                     self.team_pts_a += pts
                     for p in on_court:
                         self.on_pts_a[p] += pts
+                        per_game_on_pts_a[p] += pts
                 
                 # --- Original Lineup point accumulation ---
                 # Use current_lineup_tuple which is based on the state *before* this event
@@ -466,7 +469,8 @@ class StatsCalculator:
                     'player': pname,
                     'mins': round(secs / 60, 1),
                     'pts': per_game_points.get(pname, 0),
-                    '+/-': per_game_plusminus.get(pname, 0) # Correct key: '+'
+                    '+/-': per_game_plusminus.get(pname, 0),
+                    'drtg': round((per_game_on_pts_a.get(pname, 0) * 40 / (secs / 60)), 1) if secs >= 60 else None
                 })
 
         return True # Indicate successful processing
@@ -484,6 +488,7 @@ class StatsCalculator:
         df['roll_pts'] = df.groupby('player')['pts'].transform(lambda s: s.rolling(3, 1).mean())
         df['roll_mins'] = df.groupby('player')['mins'].transform(lambda s: s.rolling(3, 1).mean())
         df['roll_pm'] = df.groupby('player')['+/-'].transform(lambda s: s.rolling(3, 1).mean())
+        df['roll_drtg'] = df.groupby('player')['drtg'].transform(lambda s: s.rolling(window=3, min_periods=1).mean())
         return df
 
     # ------------------------------------------------------------------
@@ -1002,6 +1007,39 @@ def plot_evolution(evo_df: pd.DataFrame, group_id: str, plot_dir: Path, names_to
         if 'g_pts' in locals() and hasattr(g_pts, 'figure'):
              plt.close(g_pts.figure)
 
+    # --- Plot DRtg ---
+    try:
+        if 'roll_drtg' in filtered_evo_df.columns:
+            logger.info("Generating DRtg evolution plot for group %s...", group_id)
+            df_melt_drtg = filtered_evo_df.melt(id_vars=['game_idx', 'player'],
+                                      value_vars=['drtg', 'roll_drtg'],
+                                      var_name='Metric_Type',
+                                      value_name='DRtg')
+            sns.set_theme(style="ticks")
+            g_drtg = sns.relplot(
+                data=df_melt_drtg,
+                x="game_idx", y="DRtg",
+                hue="player",
+                style="Metric_Type",
+                col="player", col_wrap=4,
+                kind="line",
+                height=3, aspect=1.5,
+                legend=False
+            )
+            g_drtg.set_titles("{col_name}")
+            g_drtg.set_axis_labels("Game Index", "Defensive Rating (DRtg)")
+            for ax in g_drtg.axes.flat:
+                ax.invert_yaxis()  # Lower DRtg is better
+            g_drtg.figure.suptitle(f'Defensive Rating Evolution - Group {group_id}', y=1.03)
+            plot_path_drtg = plot_dir / f"evolution_drtg_group_{group_id}.png"
+            g_drtg.savefig(plot_path_drtg, dpi=150)
+            plt.close(g_drtg.figure)
+            logger.info("-> Saved DRtg plot: %s", plot_path_drtg)
+    except Exception as e:
+        logger.error("Failed to generate/save DRtg plot for group %s: %s", group_id, e)
+        if 'g_drtg' in locals() and hasattr(g_drtg, 'figure'):
+            plt.close(g_drtg.figure)
+
 
 # --- Plotting Function: Pairwise Heatmap ---
 def plot_pairwise_heatmap(pairwise_df: pd.DataFrame, group_id: str, plot_dir: Path):
@@ -1041,7 +1079,7 @@ def plot_minutes_stacked(evo_df: pd.DataFrame, group_id: str, plot_dir: Path):
 
     # Pivot the table for stacked bar chart: games as index, players as columns, minutes as values
     try:
-        minutes_pivot = evo_df.pivot(index='game_idx', columns='player', values='mins').fillna(0)
+        minutes_pivot = evo_df.pivot_table(index='game_idx', columns='player', values='mins', aggfunc='sum').fillna(0)
     except Exception as e:
         logger.error("Failed to pivot evolution data for stacked minutes plot for group %s: %s", group_id, e)
         return
@@ -1097,7 +1135,7 @@ def plot_player_on_net(onoff_df: pd.DataFrame, group_id: str, plot_dir: Path):
 
     try:
         plt.figure(figsize=(10, 6))
-        barplot = sns.barplot(x='Player', y='On_Net', data=onoff_df_sorted, palette='coolwarm')
+        barplot = sns.barplot(x='Player', y='On_Net', hue='Player', data=onoff_df_sorted, palette='coolwarm', legend=False)
         # Add value labels on bars
         for index, row in onoff_df_sorted.iterrows():
              barplot.text(index, row.On_Net + (1 if row.On_Net >= 0 else -1), # Adjust position based on value
@@ -1139,7 +1177,7 @@ def plot_lineup_netrtg(lineup_df: pd.DataFrame, group_id: str, plot_dir: Path):
 
     try:
         plt.figure(figsize=(12, 7)) # Wider figure for lineup names
-        barplot = sns.barplot(x='lineup', y='NetRtg', data=lineup_df_sorted, palette='viridis')
+        barplot = sns.barplot(x='lineup', y='NetRtg', hue='lineup', data=lineup_df_sorted, palette='viridis', legend=False)
         # Add value labels
         for index, row in lineup_df_sorted.iterrows():
              barplot.text(index, row.NetRtg + (1 if row.NetRtg >= 0 else -1),
@@ -1148,7 +1186,7 @@ def plot_lineup_netrtg(lineup_df: pd.DataFrame, group_id: str, plot_dir: Path):
         plt.xlabel("Lineup (Shortened Names)")
         plt.ylabel("Net Rating")
         plt.xticks(rotation=75, ha='right') # Rotate more for long lineup names
-        plt.tight_layout()
+        plt.tight_layout(rect=[0, 0, 1, 1])
         plt.savefig(filename, dpi=150)
         plt.close()
         logger.info("-> Saved Lineup NetRtg Bar Chart: %s", filename)
