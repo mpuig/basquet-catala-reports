@@ -1254,7 +1254,7 @@ INDEX_HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <h1>Match Report Index</h1>
+    <h1>Match Report Index (Team: {{ target_team_id }})</h1>
     
     {% if reports %}
     <table>
@@ -1262,28 +1262,27 @@ INDEX_HTML_TEMPLATE = """
             <tr>
                 <th>Date</th>
                 <th>Group</th>
-                <th>Home Team</th>
-                <th>Away Team</th>
+                <th>Target Team</th>
+                <th>Opponent</th>
+                <th>Score</th>
                 <th>Report Link</th>
             </tr>
         </thead>
         <tbody>
-            {% for report in reports | sort(attribute='match_date') %}
+            {% for report in reports %} {# Use already sorted reports #}
             <tr>
                 <td>{{ report.match_date }}</td>
                 <td>{{ report.group_name }}</td>
-                {# Determine home/away based on who the target team is #}
-                {% set home_team = report.team_name if report.team_name == report.match_info.local_team else report.opponent_name %}
-                {% set away_team = report.opponent_name if report.team_name == report.match_info.local_team else report.team_name %}
-                <td>{{ home_team }}</td>
-                <td>{{ away_team }}</td>
+                <td>{{ report.team_name }}</td>
+                <td>{{ report.opponent_name }}</td>
+                <td>{{ report.score }}</td> {# Added Score #}
                 <td><a href="{{ report.report_path }}">{{ report.match_id }}</a></td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
     {% else %}
-    <p>No match reports were generated.</p>
+    <p>No match reports were generated for Team {{ target_team_id }}.</p>
     {% endif %}
 
 </body>
@@ -1525,27 +1524,43 @@ def main() -> None:
     if skipped_match_count > 0:
         logger.warning(f"Skipped {skipped_match_count} matches due to missing data.")
 
-    # Save report links data to file
-    report_links_file_path = output_dir / "report_links.json"
-    report_links_file_path.write_text(json.dumps(report_links_data), encoding='utf-8')
-    logger.info(f"Saved report links to: {report_links_file_path}")
-
     # --- Generate Index HTML --- 
     if report_links_data:
         logger.info("Generating index.html...")
         try:
             index_template = env.from_string(INDEX_HTML_TEMPLATE)
             # Sort reports by date before rendering
-            sorted_reports = sorted(report_links_data, key=lambda x: x.get('match_date', ''))
-            index_html_content = index_template.render(reports=sorted_reports)
+            # Handle potential errors if date format is inconsistent or missing
+            def sort_key(report):
+                try:
+                    # Attempt to parse date assuming DD-MM-YYYY HH:MM format
+                    return pd.to_datetime(report.get('match_date', '1900-01-01'), format='%d-%m-%Y %H:%M', errors='coerce')
+                except ValueError:
+                     # Fallback for unexpected formats or unparseable dates
+                    return pd.Timestamp('1900-01-01')
+
+            sorted_reports = sorted(report_links_data, key=sort_key)
+
+            index_html_content = index_template.render(
+                reports=sorted_reports,
+                target_team_id=target_team_id # Pass team ID for title
+            )
             index_html_path = output_dir / "index.html"
             index_html_path.write_text(index_html_content, encoding='utf-8')
             logger.info(f"Successfully generated index file: {index_html_path}")
         except Exception as e:
             logger.error(f"Failed to generate index.html: {e}")
+            import traceback
+            traceback.print_exc() # Print stack trace for debugging Jinja errors
     else:
-        logger.info("No reports were generated, skipping index.html creation.")
+        logger.info(f"No reports were generated for Team {target_team_id}, skipping index.html creation.")
 
 
 if __name__ == "__main__":
+    # Add json import at the top if not already there
+    import json 
+    # Need pandas for date sorting fallback
+    import pandas as pd 
+    # Need traceback for debugging
+    import traceback 
     main()
