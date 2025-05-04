@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Set, Any
 
 import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 ################################################################################
 # Configuration & logging                                                       #
@@ -181,13 +183,14 @@ class StatsCalculator:
         self.lineup_stats: Dict[tuple, Dict[str, Any]] = defaultdict(lambda: {'secs': 0.0,
                                                                               'pts_for': 0,
                                                                               'pts_against': 0})
+        self.plus_minus: Dict[str, int] = defaultdict(int)  # +/- por jugadora
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def process(
-        self, schedule: pd.DataFrame, all_moves: Dict[str, Sequence[dict]], 
+        self, schedule: pd.DataFrame, all_moves: Dict[str, Sequence[dict]],
         all_stats: Dict[str, dict] # Add match stats data
     ) -> None:
         """Iterate schedule rows & their events to populate aggregates."""
@@ -213,14 +216,14 @@ class StatsCalculator:
                 # log.debug("No stats data found for match %s, skipping ID mapping.", match_id)
                 skipped_matches_no_stats += 1
                 continue
-            
+
             # Pass the stats data to the processing function
             mapped = self._process_single_game(match_id, row_series, events, stats_data)
             if mapped:
                 processed_matches += 1
             else:
                 skipped_matches_id_mapping += 1
-        
+
         logger.info("Processing complete. Total matches in schedule: %d", len(schedule))
         logger.info("Successfully processed stats for %d matches.", processed_matches)
         if skipped_matches_no_moves > 0:
@@ -229,6 +232,11 @@ class StatsCalculator:
             logger.warning("Skipped %d matches due to missing stats JSON.", skipped_matches_no_stats)
         if skipped_matches_id_mapping > 0:
             logger.warning("Skipped %d matches due to failed team ID mapping (check stats JSON).", skipped_matches_id_mapping)
+            
+        # Log final lineup stats before generating table
+        # logger.debug("Final Lineup Stats before table generation:") # REMOVED
+        # for lu, stats in self.lineup_stats.items(): # REMOVED
+            # logger.debug(f"  Lineup: {lu} -> {stats}") # REMOVED
 
     # ------------------------------------------------------------------
     # Private helpers – one game
@@ -239,7 +247,7 @@ class StatsCalculator:
         stats_data: dict # Add stats data
     ) -> bool: # Return True if processed, False if skipped due to mapping
         """Core loop; translates original long logic into smaller steps."""
-        
+
         target_team_schedule_id = self.team_id # ID from the schedule CSV (e.g., '69630')
         match_stats_teams = stats_data.get("teams", [])
         internal_id = None # Internal ID used in moves/stats JSON (e.g., 319033)
@@ -259,20 +267,22 @@ class StatsCalculator:
             )
             return False # Indicate mapping failure
         else:
-            logger.debug("Mapped schedule team %s (%s) to internal ID %s for match %s", 
+            logger.debug("Mapped schedule team %s (%s) to internal ID %s for match %s",
                          target_team_schedule_id, target_team_name, internal_id, match_id)
 
         # --- The rest of the processing logic remains largely the same ---
         # ---- per‑game accumulators ------------------------------------------------
         per_game_minutes: Dict[str, float] = defaultdict(float)
         per_game_points: Dict[str, int] = defaultdict(int)
+        per_game_plusminus: Dict[str, int] = defaultdict(int)
         last_lineup_tuple: tuple | None = None
+        current_lineup_tuple: tuple | None = None # Track lineup for event attribution
         # ... (Initialize player_state, on_court, current_period_start_sec etc.)
         player_state: Dict[str, Dict] = {}
         on_court: Set[str] = set()
         current_period_start_sec = 0.0
         last_event_abs_seconds = 0.0
-        game_end_sec = 0.0 
+        game_end_sec = 0.0
         last_processed_period = 0
 
         for event in events:
@@ -293,43 +303,40 @@ class StatsCalculator:
                 # A better approach would be to get actual period start/end times if available
                 current_period_start_sec = last_event_abs_seconds # Or base on previous period end
                 last_processed_period = period
-                # Reset game clock time for the new period? Assuming minute resets to 0? 
-                # The data shows minute continues across periods (e.g. minute 15 is in period 2)
-                # We need to be careful how absolute time is calculated. 
-                # Simplest: assume 10 min (600s) per period before the current one.
-                # current_period_start_sec = (period - 1) * 600.0 
-
-                # event_abs_seconds = current_period_start_sec + (minute * 60.0) + second
-                # Recalculate absolute seconds based on period * duration - remaining time
-                # Assumes period duration is 10 mins (600s)
-                # Time remaining in period = (10 - minute) * 60 - second
-                # Time elapsed in game = (period-1)*600 + (600 - time_remaining) 
-                # Simplified: elapsed = (period-1)*600 + minute*60 + second (This seems correct based on data)
-                # event_abs_seconds = ((period - 1) * 600.0) + (minute * 60.0) + second # Incorrect assumption about 'minute'
-                
                 # Use the utility function which assumes 'minute' is time remaining in period
                 event_abs_seconds = get_absolute_seconds(period, minute, second)
 
             # --- On/Off tracking -------------------------------------------------
             delta = event_abs_seconds - last_event_abs_seconds
+            # current_lineup_tuple retains its value from the previous event unless delta > 0
+            # Do NOT reset current_lineup_tuple here
+            
             if delta > 0:
                 for p in on_court:
                     self.on_secs[p] += delta
-                # ----- accumulate lineup seconds ONLY ------------------------
+                # ----- accumulate lineup seconds and update current_lineup_tuple -----
                 if len(on_court) == 5:
                     lineup_tuple = tuple(sorted(on_court))
-                    self.lineup_stats[lineup_tuple]['secs'] += delta
-                    # REMOVE point accumulation from here
-                    # if pts:
-                    #    if is_target_team_event:
-                    #        self.lineup_stats[lineup_tuple]['pts_for'] += pts
-                    #    else:
-                    #        self.lineup_stats[lineup_tuple]['pts_against'] += pts
+                    # Use .get to safely access/initialize lineup stats dictionary
+                    lu_stats = self.lineup_stats[lineup_tuple]
+                    lu_stats['secs'] = lu_stats.get('secs', 0) + delta
+                    # self.lineup_stats[lineup_tuple]['secs'] += delta # Original, potentially unsafe
+                    current_lineup_tuple = lineup_tuple # Store the active lineup tuple for subsequent delta=0 events
+                else:
+                    current_lineup_tuple = None # Reset if time elapsed but not 5 players
                 # ------------------------------------------------------------------
+            # If delta == 0, current_lineup_tuple remains unchanged from the previous event
 
             # Check for points scored in the CURRENT event
             pts = self.points_map.get(event_type, 0)
             if pts:
+                # --- ADD Player Plus/Minus Update --- 
+                point_diff = pts if is_target_team_event else -pts
+                for p in on_court:
+                    self.plus_minus[p] += point_diff
+                    per_game_plusminus[p] += point_diff
+                # --- END Player Plus/Minus Update --- 
+                
                 # Update team and player On/Off points
                 if is_target_team_event:
                     self.team_pts_f += pts
@@ -340,15 +347,27 @@ class StatsCalculator:
                     for p in on_court:
                         self.on_pts_a[p] += pts
                 
-                # --- ADD Lineup point accumulation HERE ---
-                if len(on_court) == 5:
-                    lineup_tuple = tuple(sorted(on_court))
-                    if is_target_team_event:
-                        self.lineup_stats[lineup_tuple]['pts_for'] += pts
-                    else:
-                        self.lineup_stats[lineup_tuple]['pts_against'] += pts
+                # --- Original Lineup point accumulation ---
+                # Use current_lineup_tuple which is based on the state *before* this event
+                if current_lineup_tuple is not None: 
+                    if is_target_team_event: # Target team scored
+                        self.lineup_stats[current_lineup_tuple]['pts_for'] = self.lineup_stats[current_lineup_tuple].get('pts_for', 0) + pts
+                    elif not is_target_team_event: # Opponent scored
+                         self.lineup_stats[current_lineup_tuple]['pts_against'] = self.lineup_stats[current_lineup_tuple].get('pts_against', 0) + pts
+                    # Log the state *after* potential update for this specific lineup
+                    # logger.debug(f"  LINEUP_PTS_UPDATE: {current_lineup_tuple} -> ...") # REMOVED
+                    # pts_for for the lineup is implicitly handled ... <- Comment inaccurate
                 # --- END Lineup point accumulation ---
                     
+            # --- Check for non-scoring events relevant to lineup stats ---
+            # ONLY when a 5-player lineup was active in the preceding interval and it's a target team event
+            # elif is_target_team_event and current_lineup_tuple is not None: # Use elif to avoid double counting pts=0 events
+            #      stats_dict = self.lineup_stats[current_lineup_tuple] 
+            #      # Log when attempting to update for non-scoring events
+            #      if event_type in ["Tir Fallat", "Tir lliure Fallat", "Pèrdua"]:
+            #         logger.debug(f"LINEUP_UPDATE [Match:{match_id}, Lineup:{current_lineup_tuple}]: Event=\"{event_type}\"")
+            #      # ... removed FGA/FTA/TOV increment logic ...
+
             # --------------------------------------------------------------------
             last_event_abs_seconds = event_abs_seconds
             game_end_sec = max(game_end_sec, event_abs_seconds) # Keep track of game end time
@@ -361,14 +380,14 @@ class StatsCalculator:
                     self.players[actor_name] = PlayerAggregate(number=actor_num)
                 elif self.players[actor_name].number is None and actor_num is not None:
                      self.players[actor_name].number = actor_num # Fill in number if missing
-                
+
                 pa = self.players[actor_name]
                 st = player_state.setdefault(
                     actor_name,
                     {"status": "out", "since": 0.0, "number": actor_num}
                 )
 
-                # --- Handle Player Stats --- 
+                # --- Handle Player Stats ---
                 if event_type in ["Cistella de 3", "Triple"]:
                     pa.t3 += 1
                     pa.pts += 3
@@ -385,7 +404,7 @@ class StatsCalculator:
                     pa.fouls += 1
                 # Add other event types if needed (rebounds, assists, etc.)
 
-                # --- Handle Minutes Played & Pairwise --- 
+                # --- Handle Minutes Played & Pairwise ---
                 if event_type == "Entra al camp":
                     if st["status"] == "out":
                         st["status"] = "in"
@@ -406,7 +425,7 @@ class StatsCalculator:
                         st["status"] = "out"
                         st["since"] = event_abs_seconds
 
-        # --- End of Game Processing --- 
+        # --- End of Game Processing ---
         # Flush remaining On/Off seconds from the last event until the final horn
         remaining = game_end_sec - last_event_abs_seconds
         if remaining > 0:
@@ -430,71 +449,96 @@ class StatsCalculator:
 
         # Increment GP for players who participated in this game
         if player_state: # Only increment if the target team played and had events
-            for player_name in player_state: 
+            for player_name in player_state:
                 self.players[player_name].gp += 1
 
         # ---- save per‑player game row -------------------------------------------
-        game_idx = len(self.game_log) // 1 + 1  # incremental index
+        game_idx = len(self.game_log) // len(player_state) + 1 if player_state else 1 # Avoid division by zero if no players
         for pname, secs in per_game_minutes.items():
-            self.game_log.append({
-                'game_idx': game_idx,
-                'player': pname,
-                'mins': round(secs / 60, 1),
-                'pts': per_game_points.get(pname, 0)
-            })
+            # Ensure player exists in player_state before adding to game_log?
+            # Or just add anyone with minutes?
+            # Current logic adds anyone with per_game_minutes > 0
+            if pname in self.players: # Only log if player is tracked
+                self.game_log.append({
+                    'game_idx': game_idx,
+                    'player': pname,
+                    'mins': round(secs / 60, 1),
+                    'pts': per_game_points.get(pname, 0),
+                    '+/-': per_game_plusminus.get(pname, 0) # Correct key: '+'
+                })
 
         return True # Indicate successful processing
 
     # ------------------------------------------------------------------
     # Evolution (rolling) table
     # ------------------------------------------------------------------
-    def evolution_table(self) -> pd.DataFrame:
-        df = pd.DataFrame(self.game_log)
+    def evolution_table(self, names_to_exclude: set[str] = set()) -> pd.DataFrame:
+        # Filter game log *before* creating DataFrame
+        filtered_log = [row for row in self.game_log if row['player'] not in names_to_exclude]
+        df = pd.DataFrame(filtered_log)
         if df.empty:
             return df
         df.sort_values('game_idx', inplace=True)
         df['roll_pts'] = df.groupby('player')['pts'].transform(lambda s: s.rolling(3, 1).mean())
         df['roll_mins'] = df.groupby('player')['mins'].transform(lambda s: s.rolling(3, 1).mean())
+        df['roll_pm'] = df.groupby('player')['+/-'].transform(lambda s: s.rolling(3, 1).mean())
         return df
 
     # ------------------------------------------------------------------
     # Lineup summary table
     # ------------------------------------------------------------------
-    def lineup_table(self, min_usage: float = 0.05) -> pd.DataFrame:
+    def lineup_table(self, min_usage: float = 0.05, names_to_exclude: set[str] = set()) -> pd.DataFrame:
         """Return DataFrame of lineups filtered by usage with Net Rating.
 
         Avoids KeyError when no qualifying lineups exist.
         """
         # Calculate total seconds across all tracked lineups with positive time
-        total_lineup_secs = sum(stats['secs'] for stats in self.lineup_stats.values() if stats.get('secs', 0) > 0)
+        # Filter lineups *before* calculating total seconds for usage %
+        valid_lineups = {lu: v for lu, v in self.lineup_stats.items()
+                         if v.get('secs', 0) > 0 and not any(p in names_to_exclude for p in lu)}
+
+        total_lineup_secs = sum(stats['secs'] for stats in valid_lineups.values())
         if total_lineup_secs == 0:
-            logger.info("No lineup data with positive time found.")
+            logger.info("No lineup data with positive time found after exclusions.")
             return pd.DataFrame()
 
         records = []
-        for lu, v in self.lineup_stats.items():
-            if v['secs'] <= 0:
-                continue
-            
-            # Calculate usage % relative to total lineup seconds
-            # usage = v['secs'] / total_team_secs
+        # Iterate through the pre-filtered valid lineups
+        # for lu, v in self.lineup_stats.items():
+        for lu, v in valid_lineups.items():
+            # if v['secs'] <= 0: # Already filtered
+            #     continue
+            # if any(p in names_to_exclude for p in lu): # Filter here
+            #     continue
+
+            # Calculate usage % relative to total *valid* lineup seconds
             usage_percent = (v['secs'] / total_lineup_secs) * 100 if total_lineup_secs > 0 else 0
-            
+
             # Filter based on the calculated percentage (min_usage is 0.0 to 1.0)
-            # if usage < min_usage:
             if (usage_percent / 100.0) < min_usage:
                 continue
                 
-            net = (v['pts_for'] - v['pts_against']) * 40 / (v['secs'] / 60)
+            # Log values used for NetRtg calculation
+            # logger.debug(f"NETRTG_CALC Lineup: {lu}") # REMOVED
+            # logger.debug(f"  Using: pts_for=... ") # REMOVED
+            
+            # Original NetRtg calculation
+            net = (v.get('pts_for', 0) - v.get('pts_against', 0)) * 40 / (v.get('secs', 0) / 60) if v.get('secs', 0) > 0 else 0
+            
+            # Remove eFG% and Pace calculations
+            # efg_pct = ... 
+            # pace = ...
+            
             records.append({
-                'lineup': '- '.join(map(shorten_name, lu)), # Apply shortening here too
+                'lineup': '- '.join(map(shorten_name, lu)),
                 'mins': round(v['secs'] / 60, 1),
-                # 'usage_%': round(usage * 100, 1),
                 'usage_%': round(usage_percent, 1),
-                'NetRtg': round(net, 1)
+                'NetRtg': round(net, 1) 
+                # Removed 'eFG%' and 'Pace' keys
             })
 
         df = pd.DataFrame(records)
+        # Sort by NetRtg by default, but ensure columns exist
         if df.empty or 'NetRtg' not in df.columns:
             return df  # nothing to sort
         return df.sort_values('NetRtg', ascending=False).reset_index(drop=True)
@@ -518,7 +562,7 @@ class StatsCalculator:
     # Public accessors
     # ------------------------------------------------------------------
 
-    def player_table(self) -> pd.DataFrame:
+    def player_table(self, names_to_exclude: set[str] = set()) -> pd.DataFrame:
         data = {
             "Player": [],
             "#": [],
@@ -529,40 +573,52 @@ class StatsCalculator:
             "T2": [],
             "T1": [],
             "Fouls": [],
+            "+/-": [],
         }
         for name, aggr in sorted(
             self.players.items(), key=lambda it: it[1].pts, reverse=True
         ):
-            data["Player"].append(shorten_name(name))
-            data["#"].append(aggr.number)
-            data["GP"].append(aggr.gp)
-            data["Mins"].append(aggr.minutes)
-            data["PTS"].append(aggr.pts)
-            data["T3"].append(aggr.t3)
-            data["T2"].append(aggr.t2)
-            data["T1"].append(aggr.t1)
-            data["Fouls"].append(aggr.fouls)
+            # Add filtering condition here
+            if name not in names_to_exclude:
+                data["Player"].append(shorten_name(name))
+                data["#"].append(aggr.number)
+                data["GP"].append(aggr.gp)
+                data["Mins"].append(aggr.minutes)
+                data["PTS"].append(aggr.pts)
+                data["T3"].append(aggr.t3)
+                data["T2"].append(aggr.t2)
+                data["T1"].append(aggr.t1)
+                data["Fouls"].append(aggr.fouls)
+                data["+/-"].append(self.plus_minus.get(name, 0))
         return pd.DataFrame(data)
 
-    def pairwise_minutes(self) -> pd.DataFrame:
+    def pairwise_minutes(self, names_to_exclude: set[str] = set()) -> pd.DataFrame:
         # Get players sorted by total minutes played (descending)
+        # Filter players *before* sorting and creating matrix
+        valid_players = {name: data for name, data in self.players.items() if name not in names_to_exclude}
+        if not valid_players:
+            return pd.DataFrame() # Return empty if no players left
+
         sorted_players_by_minutes = sorted(
-            self.players.items(), 
-            key=lambda item: item[1].minutes, 
+            # self.players.items(),
+            valid_players.items(),
+            key=lambda item: item[1].minutes,
             reverse=True
         )
         sorted_names = [name for name, _ in sorted_players_by_minutes]
-        
-        # Create matrix using the sorted names
+
+        # Create matrix using the sorted names of *valid* players
         matrix = pd.DataFrame(index=sorted_names, columns=sorted_names, dtype=int)
         for p1 in sorted_names:
             for p2 in sorted_names:
+                # No need for inner check as names are already filtered
+                # if p1 not in names_to_exclude and p2 not in names_to_exclude:
                 matrix.loc[p1, p2] = int(round(self.pairwise_secs[p1].get(p2, 0) / 60))
-        
+
         # Rename index and columns to shortened names
         matrix.index = matrix.index.map(shorten_name)
         matrix.columns = matrix.columns.map(shorten_name)
-        
+
         # Ensure all values are integers before returning
         return matrix.astype(int)
 
@@ -570,13 +626,18 @@ class StatsCalculator:
     # ------------------------------------------------------------------
     # On/Off Net Rating table
     # ------------------------------------------------------------------
-    def on_off_table(self) -> pd.DataFrame:
+    def on_off_table(self, names_to_exclude: set[str] = set()) -> pd.DataFrame:
         rows = []
-        total_secs = sum(self.on_secs.values())
+        # Filter on_secs before summing total_secs and iterating
+        valid_on_secs = {p: s for p, s in self.on_secs.items() if p not in names_to_exclude}
+        total_secs = sum(valid_on_secs.values())
         if total_secs == 0:
             return pd.DataFrame()  # no data
 
-        for player, secs_on in self.on_secs.items():
+        # Iterate through filtered players
+        # for player, secs_on in self.on_secs.items():
+        for player, secs_on in valid_on_secs.items():
+            # if player not in names_to_exclude: # No longer needed here
             mins_on = secs_on / 60
             if mins_on < 1:
                 continue  # skip very small samples
@@ -627,26 +688,43 @@ def main() -> None:
     )
     parser.add_argument("--match", default=None, help="Optional: Process only a single match ID")
     parser.add_argument("--season", default="2024", help="Season identifier (default: 2024)")
+    parser.add_argument("--plot-dir", default="plots", help="Directory to save plot images")
+    parser.add_argument("--exclude-players", nargs='+', default=[], help="List of player UUIDs to exclude from reports")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     moves_dir = data_dir / "match_moves"
-    stats_dir = data_dir / "match_stats" 
+    stats_dir = data_dir / "match_stats"
     team_stats_dir = data_dir / "team_stats" # Directory for team stats
 
-    # --- Try to load team info for headers --- 
+    # --- Try to load team info for headers ---
     team_name_for_header = args.team # Default to ID
     group_name_for_header = "Unknown Group" # Default group name
+    names_to_exclude = set() # Initialize empty set for names
+
     team_stats_data = load_team_stats(args.team, args.season, team_stats_dir)
     if team_stats_data and "team" in team_stats_data:
         team_name_for_header = team_stats_data["team"].get("teamName", args.team)
         group_name_for_header = team_stats_data["team"].get("categoryName", "Unknown Group")
+        # Build the set of names to exclude based on UUIDs
+        if args.exclude_players:
+            logger.info(f"Excluding player UUIDs: {args.exclude_players}")
+            for player_info in team_stats_data.get("players", []):
+                player_uuid = player_info.get("uuid")
+                player_name = player_info.get("name")
+                if player_uuid and player_name and player_uuid in args.exclude_players:
+                    names_to_exclude.add(player_name)
+            if names_to_exclude:
+                logger.info(f"Mapped to excluding names: {names_to_exclude}")
+            else:
+                logger.warning("Could not find names for provided excluded UUIDs in team stats file.")
+
     # Use categoryName as group name if available, otherwise keep it generic
     # The categoryName applies to the team/season, not necessarily the specific group ID being processed
     # We will use the specific group ID (gid) in the loop header for clarity
-    
+
     if args.match:
-        # --- Process Single Match --- 
+        # --- Process Single Match ---
         # (Header logic for single match might also use team_name_for_header)
         logger.info(f"Processing single match ID: {args.match} for Team: {team_name_for_header} ({args.team})")
         match_found_in_schedule = False
@@ -680,11 +758,11 @@ def main() -> None:
         if not match_found_in_schedule:
             logger.error(f"Match ID {args.match} not found in any specified group's schedule.")
             return
-        
+
         if not moves_single:
             logger.error(f"Match moves data not found or failed to load for match {args.match}.")
             # Optionally continue if only stats are needed, but core calculation depends on moves
-            return 
+            return
         if not stats_single:
             logger.error(f"Match stats data not found or failed to load for match {args.match}. Required for team ID mapping.")
             return
@@ -694,7 +772,7 @@ def main() -> None:
         calc.process(schedule_df_single, {args.match: moves_single}, {args.match: stats_single})
 
         # Display results for the single match
-        print_results(calc)
+        print_results(calc, names_to_exclude)
 
     else:
         # --- Process Multiple Groups Separately ---
@@ -702,7 +780,7 @@ def main() -> None:
             # Use loaded team name, but specific group ID (gid) for clarity
             print(f"\n{'='*15} Processing Group ID: {gid} | Team: {team_name_for_header} ({args.team}) {'='*15}")
             csv_path = data_dir / f"results_{gid}.csv"
-            
+
             # Data specific to this group
             current_group_schedule = None
             current_group_moves: Dict[str, List[dict]] = {}
@@ -711,7 +789,7 @@ def main() -> None:
             try:
                 schedule_df = load_schedule(csv_path)
                 current_group_schedule = schedule_df # Keep this group's schedule separate
-                
+
                 # Load moves and stats only for matches in this group's schedule
                 match_ids_in_group = schedule_df["match_id"].dropna().astype(str).unique()
                 logger.info(f"Loading JSON data for {len(match_ids_in_group)} matches in group {gid}...")
@@ -725,70 +803,155 @@ def main() -> None:
 
             except FileNotFoundError:
                 logger.error("Schedule file not found: %s. Skipping group %s.", csv_path, gid)
-                continue 
+                continue
             except ValueError as e:
                 logger.error("Error loading schedule %s: %s. Skipping group %s.", csv_path, e, gid)
                 continue
             except Exception as e:
                  logger.error("Unexpected error processing schedule %s: %s. Skipping group %s.", csv_path, e, gid)
                  continue
-        
+
             if current_group_schedule is None or current_group_schedule.empty:
                  logger.warning(f"No schedule data loaded for group {gid}. Skipping processing.")
                  continue
-                 
+
             # Instantiate and process *for this group only*
             logger.info(f"Calculating stats for group {gid}...")
-            calc = StatsCalculator(args.team) 
-            calc.process(current_group_schedule, current_group_moves, current_group_stats) 
+            calc = StatsCalculator(args.team)
+            calc.process(current_group_schedule, current_group_moves, current_group_stats)
 
             # Display results *for this group*
-            print_results(calc)
-            
+            print_results(calc, names_to_exclude)
+
+            # --- Generate and Save Plots ---
+            evo_table = calc.evolution_table(names_to_exclude=names_to_exclude)
+            plot_output_dir = Path(args.plot_dir)
+            plot_evolution(evo_table, gid, plot_output_dir, names_to_exclude=names_to_exclude)
+            # --- End Plots ---
+
             print(f"\n{'='*15} Finished Group: {gid} {'='*15}") # Mark end of group output
 
-def print_results(calc: 'StatsCalculator'):
+def print_results(calc: 'StatsCalculator', names_to_exclude: set[str]):
     """Helper function to print the standard output tables."""
-    if not calc.players:
-        print("\n(No data found for this team in the processed match(es))")
+    # Filter players before checking if data exists
+    filtered_players = {name: data for name, data in calc.players.items() if name not in names_to_exclude}
+    if not filtered_players:
+        print("\n(No data found for this team OR all players excluded in the processed match(es))")
         return
 
     print("\n==== Player Aggregates ====")
-    player_df = calc.player_table()
+    player_df = calc.player_table(names_to_exclude=names_to_exclude)
     if not player_df.empty:
         print(player_df.to_string(index=False))
     else:
-        print("(No data found for this team in the processed match(es))")
+        print("(No player data to display after exclusions)")
 
     print("\n==== Pairwise minutes (first 10×10) ====")
-    pair_df = calc.pairwise_minutes()
+    pair_df = calc.pairwise_minutes(names_to_exclude=names_to_exclude)
     if not pair_df.empty:
         # Limit to max 10x10 for display
         max_dim = min(10, pair_df.shape[0], pair_df.shape[1])
         print(pair_df.iloc[:max_dim, :max_dim].to_string(float_format='{:d}'.format))
     else:
-        print("(No data found for this team in the processed match(es))")
+        print("(No pairwise data to display after exclusions)")
 
     print("\n==== On/Off Net Rating ====")
-    onoff_df = calc.on_off_table()
+    onoff_df = calc.on_off_table(names_to_exclude=names_to_exclude)
     if not onoff_df.empty:
         print(onoff_df.to_string(index=False))
     else:
-        print("(Insufficient data for On/Off calculation)")
+        print("(Insufficient data for On/Off calculation or all players excluded)")
 
-    print("\n==== Evolution (rolling 3‑games) sample ====")
-    evo = calc.evolution_table()
+    print("\n==== Evolution (rolling 3‑games) ====") # Removed 'sample' from header
+    evo = calc.evolution_table(names_to_exclude=names_to_exclude)
     if not evo.empty:
-        print(evo.head(10).to_string(index=False))
+        # print(evo.head(10).to_string(index=False))
+        print(evo.to_string(index=False, float_format='{:.1f}'.format)) # Format floats to 1 decimal place
     else:
-        print("(No evolution data)")
+        print("(No evolution data after exclusions)")
 
     print("\n==== Lineups (usage ≥5 %) ====")
-    lu_df = calc.lineup_table()
+    lu_df = calc.lineup_table(names_to_exclude=names_to_exclude)
     if not lu_df.empty:
         print(lu_df.head(10).to_string(index=False))
     else:
-        print("(No lineup data or insufficient usage)")
+        print("(No lineup data meeting criteria after exclusions)")
+
+
+def plot_evolution(evo_df: pd.DataFrame, group_id: str, plot_dir: Path, names_to_exclude: set[str] = set()):
+    """Generates and saves faceted line plots for player evolution."""
+    # Filter DataFrame before plotting
+    filtered_evo_df = evo_df[~evo_df['player'].isin(names_to_exclude)]
+
+    # if evo_df.empty:
+    if filtered_evo_df.empty:
+        logger.info("Evolution DataFrame is empty after exclusions, skipping plots for group %s.", group_id)
+        return
+
+    # Ensure plot directory exists
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    # Melt DataFrame for easier plotting with Seaborn's hue/style
+    df_melt_mins = filtered_evo_df.melt(id_vars=['game_idx', 'player'],
+                               value_vars=['mins', 'roll_mins'],
+                               var_name='Metric_Type',
+                               value_name='Minutes')
+    df_melt_pts = filtered_evo_df.melt(id_vars=['game_idx', 'player'],
+                              value_vars=['pts', 'roll_pts'],
+                              var_name='Metric_Type',
+                              value_name='Points')
+
+    # --- Plot Minutes ---
+    try:
+        logger.info("Generating Minutes evolution plot for group %s...", group_id)
+        sns.set_theme(style="ticks")
+        g_mins = sns.relplot(
+            data=df_melt_mins,
+            x="game_idx", y="Minutes",
+            hue="player",  # Color lines by player
+            style="Metric_Type", # Different style for actual vs rolling
+            col="player", col_wrap=4, # Facet by player, 4 columns wide
+            kind="line",
+            height=3, aspect=1.5,
+            legend=False # Avoid giant legend, colors identify player in title
+        )
+        g_mins.set_titles("{col_name}")
+        g_mins.set_axis_labels("Game Index", "Minutes")
+        g_mins.figure.suptitle(f'Minutes Evolution - Group {group_id}', y=1.03)
+        plot_path_mins = plot_dir / f"evolution_minutes_group_{group_id}.png"
+        g_mins.savefig(plot_path_mins, dpi=150)
+        plt.close(g_mins.figure) # Close figure to free memory
+        logger.info("-> Saved Minutes plot: %s", plot_path_mins)
+    except Exception as e:
+        logger.error("Failed to generate/save minutes plot for group %s: %s", group_id, e)
+        if 'g_mins' in locals() and hasattr(g_mins, 'figure'):
+             plt.close(g_mins.figure) # Attempt to close if figure exists
+
+    # --- Plot Points ---
+    try:
+        logger.info("Generating Points evolution plot for group %s...", group_id)
+        sns.set_theme(style="ticks")
+        g_pts = sns.relplot(
+            data=df_melt_pts,
+            x="game_idx", y="Points",
+            hue="player",
+            style="Metric_Type",
+            col="player", col_wrap=4,
+            kind="line",
+            height=3, aspect=1.5,
+            legend=False
+        )
+        g_pts.set_titles("{col_name}")
+        g_pts.set_axis_labels("Game Index", "Points")
+        g_pts.figure.suptitle(f'Points Evolution - Group {group_id}', y=1.03)
+        plot_path_pts = plot_dir / f"evolution_points_group_{group_id}.png"
+        g_pts.savefig(plot_path_pts, dpi=150)
+        plt.close(g_pts.figure) # Close figure
+        logger.info("-> Saved Points plot: %s", plot_path_pts)
+    except Exception as e:
+        logger.error("Failed to generate/save points plot for group %s: %s", group_id, e)
+        if 'g_pts' in locals() and hasattr(g_pts, 'figure'):
+             plt.close(g_pts.figure)
 
 
 if __name__ == "__main__":
