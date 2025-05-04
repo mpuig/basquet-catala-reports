@@ -1,17 +1,40 @@
 """
 Generate Individual Match HTML Reports
 -------------------------------------
-• Python 3.10+
-• Pandas ≥ 2.0
-• Jinja2
-• markdown2
 
-Usage (CLI example)
--------------------
-$ python generate_match_reports.py --team 69630 --groups 17182 18299 --data-dir data --output-dir reports
+Generates detailed HTML reports for individual basketball matches based on data
+downloaded by `fetch_data.py`. For each match involving the specified target team
+found in the provided group schedules, this script:
 
-This script generates an HTML report for each match found in the specified group schedules
-where the specified team played, including stats, summaries, and charts.
+1.  Calculates per-match statistics (Player aggregates, On/Off, Lineups) for the target team.
+2.  Generates a markdown summary (`summary.md`) including team stat comparison.
+3.  (Optional) Generates an AI-powered narrative summary using an LLM (`llm_summary.md`, cached).
+4.  Generates plots (PNG): Score timeline, Pairwise minutes heatmap, Player On/Off chart, Lineup NetRtg chart.
+5.  Combines the summaries, tables, and plots into a final HTML report (`report.html`).
+6.  Creates an `index.html` file listing all generated reports, sorted by date.
+
+Dependencies:
+-------------
+*   Python 3.10+
+*   pandas >= 2.0
+*   matplotlib
+*   seaborn
+*   numpy
+*   jinja2
+*   markdown2
+*   (Optional) litellm (and an API key for the chosen LLM, e.g., OPENAI_API_KEY)
+
+CLI Examples:
+-------------
+1.  Generate reports for Team 69630 in groups 17182 and 18299:
+    $ python generate_match_reports.py --team 69630 --groups 17182 18299
+
+2.  Specify data and output directories:
+    $ python generate_match_reports.py --team 69630 --groups 17182 --data-dir ../data --output-dir ../output/reports
+
+3.  Use a different season identifier (affects official stats link):
+    $ python generate_match_reports.py --team 69630 --groups 17182 --season 2023
+
 """
 
 from __future__ import annotations
@@ -90,6 +113,7 @@ def shorten_name(full_name: str) -> str:
 
 @dataclass
 class PlayerAggregate:
+    """Holds aggregated statistics for a single player."""
     number: str = "??"
     gp: int = 0
     secs_played: float = 0.0
@@ -186,7 +210,14 @@ def load_match_stats(match_id: str, stats_dir: Path) -> dict | None:
 
 
 class StatsCalculator:
-    """Encapsulates all per‑team computations (minutes, points, lineups…)."""
+    """Calculates and stores statistics for a single team over a set of matches.
+    
+    Processes play-by-play event data to compute player aggregates, on/off court
+    metrics, pairwise minutes, and lineup performance.
+    
+    Designed to be instantiated once per report generation scope (e.g., per match
+    in this script, or per group if used for aggregation).
+    """
 
     points_map = {"Cistella de 1": 1, "Cistella de 2": 2, "Cistella de 3": 3}
     foul_keywords = ("Personal", "Tècnica", "Antiesportiva", "Desqualificant")
@@ -229,7 +260,17 @@ class StatsCalculator:
         all_moves: Dict[str, Sequence[dict]],
         all_stats: Dict[str, dict],  # Add match stats data
     ) -> None:
-        """Iterate schedule rows & their events to populate aggregates."""
+        """Processes all matches found in the schedule data.
+
+        Iterates through the provided schedule, loads corresponding moves and stats
+        data, maps the target team ID, and processes events for each match using
+        internal helper methods.
+
+        Args:
+            schedule: DataFrame containing schedule information (must include 'match_id').
+            all_moves: Dictionary mapping match_id to a list of play-by-play events.
+            all_stats: Dictionary mapping match_id to aggregated match stats JSON data.
+        """
         processed_matches = 0
         skipped_matches_no_moves = 0
         skipped_matches_no_stats = 0
@@ -558,10 +599,19 @@ class StatsCalculator:
         min_usage: float = 0.0,
         names_to_exclude: set[str] = set(),  # Lower default usage for single game
     ) -> pd.DataFrame:
-        """Return DataFrame of lineups filtered by usage with Net Rating.
+        """Generates a DataFrame summarizing lineup performance.
 
-        Avoids KeyError when no qualifying lineups exist.
-        Adjusted min_usage default for single-game context.
+        Calculates minutes played, usage percentage (relative to total valid lineup time),
+        and Net Rating (per 40 min) for each 5-player lineup that played.
+        Filters out lineups with less than min_usage and those containing excluded players.
+
+        Args:
+            min_usage: Minimum usage percentage (0.0 to 1.0) required for a lineup to be included.
+                       Defaults to 0.0 for single-match context.
+            names_to_exclude: A set of player names to exclude from calculations.
+
+        Returns:
+            pandas.DataFrame: Sorted by NetRtg (desc), including lineup, mins, usage_%, NetRtg.
         """
         # Calculate total seconds across all tracked lineups with positive time
         # Filter lineups *before* calculating total seconds for usage %
@@ -627,10 +677,18 @@ class StatsCalculator:
     # ------------------------------------------------------------------
 
     def player_table(self, names_to_exclude: set[str] = set()) -> pd.DataFrame:
+        """Generates a DataFrame summarizing aggregate player statistics.
+        
+        Args:
+            names_to_exclude: A set of player names to exclude from the table.
+            
+        Returns:
+            pandas.DataFrame: Player stats (Player, #, Mins, PTS, T3, T2, T1, Fouls, +/-), 
+                              sorted by PTS descending.
+        """
         data = {
             "Player": [],
             "#": [],
-            # "GP": [], # GP is always 1 for single match
             "Mins": [],
             "PTS": [],
             "T3": [],
@@ -645,7 +703,6 @@ class StatsCalculator:
             if name not in names_to_exclude:
                 data["Player"].append(shorten_name(name))
                 data["#"].append(aggr.number)
-                # data["GP"].append(aggr.gp)
                 data["Mins"].append(aggr.minutes)
                 data["PTS"].append(aggr.pts)
                 data["T3"].append(aggr.t3)
@@ -656,6 +713,16 @@ class StatsCalculator:
         return pd.DataFrame(data)
 
     def pairwise_minutes(self, names_to_exclude: set[str] = set()) -> pd.DataFrame:
+        """Generates a matrix DataFrame showing total minutes pairs of players played together.
+        
+        Args:
+            names_to_exclude: A set of player names to exclude from the matrix.
+            
+        Returns:
+            pandas.DataFrame: A square matrix where index/columns are shortened player names
+                              (sorted by total minutes played) and values are total integer 
+                              minutes played together.
+        """
         # Get players sorted by total minutes played (descending)
         # Filter players *before* sorting and creating matrix
         valid_players = {
@@ -1382,7 +1449,7 @@ def _generate_single_report(
     """Loads data, calculates stats, generates components, and renders HTML for ONE match."""
     match_id = str(match_info_row.get("match_id", ""))
     # Assume team ID conversion already happened before calling this function
-    local_team_id = str(match_info_row.get("local_team_id", ""))
+    local_team_id = str(int(float(match_info_row.get("local_team_id", ""))))
 
     logger.info(f"Processing Match ID: {match_id} (Group: {gid})")
 

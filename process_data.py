@@ -1,16 +1,49 @@
 """
-U13 ASFE season analysis – refactored module
--------------------------------------------
-• Python 3.10+
-• Pandas ≥ 2.0
-• No external dependencies beyond std-lib + pandas
+Process Basketball Statistics Data
+----------------------------------
 
-Usage (CLI example)
--------------------
-$ python u13_analysis_refactor.py --team 69630 --groups 17182 18299 --data-dir data
+This script analyzes basketball match data downloaded by `fetch_data.py`.
+It calculates various statistics for a specified team across one or more competition groups,
+prints summary tables to the console, and generates plots.
 
-This script prints basic player & lineup tables equivalent to the original script
-but generated through a cleaner, testable architecture.
+Features:
+---------
+*   Calculates aggregate player stats (GP, Mins, PTS, T3/T2/T1, Fouls, +/-).
+*   Calculates On/Off court Net Rating per player.
+*   Calculates pairwise minutes played between teammates.
+*   Calculates lineup statistics (Mins, Usage %, NetRtg).
+*   Generates evolution tables/plots showing rolling averages for key stats.
+*   Generates plots: pairwise heatmap, stacked points, On/Off bars, lineup bars, player comparison radar.
+*   Supports processing multiple groups or a single match.
+*   Allows excluding specific players from analysis and plots.
+*   Optionally generates individual HTML reports for each match (integrating logic from generate_match_reports.py).
+
+Dependencies:
+-------------
+*   Python 3.10+
+*   pandas >= 2.0
+*   matplotlib
+*   seaborn
+*   numpy
+*   (Optional, for match reports) jinja2, markdown2, litellm
+
+CLI Examples:
+-------------
+1.  Analyze two groups for a team, saving plots:
+    $ python process_data.py --team 69630 --groups 17182 18299 --data-dir data --plot-dir plots
+
+2.  Analyze only group 17182, excluding player UUID 'uuid1':
+    $ python process_data.py --team 69630 --groups 17182 --data-dir data --exclude-players uuid1
+
+3.  Analyze only a single match:
+    $ python process_data.py --team 69630 --match 66eee759189aa402d83001d7 --data-dir data
+
+4.  Analyze two groups and generate a comparison radar chart for 'Player A':
+    $ python process_data.py --team 69630 --groups 17182 18299 --compare-player "Player A"
+
+5.  (If merged) Analyze groups and generate individual match reports:
+    $ python process_data.py --team 69630 --groups 17182 18299 --generate-match-reports --reports-dir reports
+
 """
 
 from __future__ import annotations
