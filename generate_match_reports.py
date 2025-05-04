@@ -114,6 +114,7 @@ def shorten_name(full_name: str) -> str:
 @dataclass
 class PlayerAggregate:
     """Holds aggregated statistics for a single player."""
+
     number: str = "??"
     gp: int = 0
     secs_played: float = 0.0
@@ -211,10 +212,10 @@ def load_match_stats(match_id: str, stats_dir: Path) -> dict | None:
 
 class StatsCalculator:
     """Calculates and stores statistics for a single team over a set of matches.
-    
+
     Processes play-by-play event data to compute player aggregates, on/off court
     metrics, pairwise minutes, and lineup performance.
-    
+
     Designed to be instantiated once per report generation scope (e.g., per match
     in this script, or per group if used for aggregation).
     """
@@ -678,12 +679,12 @@ class StatsCalculator:
 
     def player_table(self, names_to_exclude: set[str] = set()) -> pd.DataFrame:
         """Generates a DataFrame summarizing aggregate player statistics.
-        
+
         Args:
             names_to_exclude: A set of player names to exclude from the table.
-            
+
         Returns:
-            pandas.DataFrame: Player stats (Player, #, Mins, PTS, T3, T2, T1, Fouls, +/-), 
+            pandas.DataFrame: Player stats (Player, #, Mins, PTS, T3, T2, T1, Fouls, +/-),
                               sorted by PTS descending.
         """
         data = {
@@ -714,13 +715,13 @@ class StatsCalculator:
 
     def pairwise_minutes(self, names_to_exclude: set[str] = set()) -> pd.DataFrame:
         """Generates a matrix DataFrame showing total minutes pairs of players played together.
-        
+
         Args:
             names_to_exclude: A set of player names to exclude from the matrix.
-            
+
         Returns:
             pandas.DataFrame: A square matrix where index/columns are shortened player names
-                              (sorted by total minutes played) and values are total integer 
+                              (sorted by total minutes played) and values are total integer
                               minutes played together.
         """
         # Get players sorted by total minutes played (descending)
