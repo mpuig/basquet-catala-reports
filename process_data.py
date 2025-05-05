@@ -881,7 +881,7 @@ def main() -> None:
                 # Check if the match ID exists in this group's schedule
                 match_row = schedule_df_group[
                     schedule_df_group["match_id"] == args.match
-                    ]
+                ]
                 if not match_row.empty:
                     logger.info(f"Match {args.match} found in group {gid} schedule.")
                     schedule_df_single = match_row
@@ -1667,10 +1667,10 @@ def plot_player_comparison_radar(
     try:
         player1_stats = g1_data["player_df"][
             g1_data["player_df"]["Player"] == shorten_name(player_name)
-            ].iloc[0]
+        ].iloc[0]
         player2_stats = g2_data["player_df"][
             g2_data["player_df"]["Player"] == shorten_name(player_name)
-            ].iloc[0]
+        ].iloc[0]
     except IndexError:
         logger.error(
             f"Could not find player '{player_name}' (shortened: {shorten_name(player_name)}) in the results for both groups. Check spelling and data."
