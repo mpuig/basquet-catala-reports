@@ -50,7 +50,6 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Set, Any, Optional
 
 import litellm
-import markdown2  # For converting summary.md to HTML
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -79,7 +78,7 @@ LLM_MAX_TOKENS = 250
 
 # --- Logging Setup ---
 logging.basicConfig(
-    level=logging.INFO,  # Default to INFO, can be overridden if needed
+    level=logging.DEBUG,  # Default to INFO, can be overridden if needed
     format="%(levelname)s | %(name)s | %(asctime)s | %(message)s",
     stream=sys.stderr,
 )
@@ -282,8 +281,10 @@ class StatsCalculator:
             if not match_id or match_id.lower() == "nan":
                 continue
 
+            # ---> THESE TWO LINES MUST BE EXACTLY HERE <---
             events = all_moves.get(match_id)
             stats_data = all_stats.get(match_id)
+            # ---> END OF REQUIRED LINES <---
 
             if not events:
                 skipped_matches_no_moves += 1
@@ -803,9 +804,7 @@ class StatsCalculator:
             rows.append(
                 {
                     "Player": shorten_name(player),
-                    "Mins_ON": round(
-                        mins_on, 2
-                    ),
+                    "Mins_ON": round(mins_on, 2),
                     "On_Net": round(on_net, 1),
                     "Off_Net": round(off_net, 1) if off_net is not None else "—",
                     "ON-OFF": round(diff, 1) if diff is not None else "—",
@@ -1316,6 +1315,7 @@ HTML_TEMPLATE = """
         .plot { margin-bottom: 30px; text-align: center; }
         .plot img { max-width: 100%; height: auto; border: 1px solid #ddd; }
         .plot-caption { font-size: 0.9em; color: #555; margin-top: 5px; }
+        .stats-section { margin-bottom: 30px; }
     </style>
 </head>
 <body>
@@ -1323,7 +1323,7 @@ HTML_TEMPLATE = """
     <p><strong>Match ID:</strong> <a href="https://www.basquetcatala.cat/estadistiques/{{ season }}/{{ match_id }}" target="_blank" title="View official stats page">{{ match_id }}</a> | <strong>Date:</strong> {{ match_date }} | <strong>Group:</strong> {{ group_name }}</p>
 
     <div class="summary">
-        {{ summary_html | safe }}
+        {{ team_comparison_html | safe }}
     </div>
 
     {% if llm_summary %}
@@ -1333,16 +1333,27 @@ HTML_TEMPLATE = """
     </div>
     {% endif %}
 
-    <h2>{{ target_team_name }} Statistics</h2>
+    <div class="stats-section">
+        <h2>{{ local_name }} - Player Aggregates</h2>
+        {{ local_player_table_html | safe }} {# RESTORED safe filter #}
+    </div>
 
-    <h3>Player Aggregates</h3>
-    {{ player_table_html | safe }}
+    <div class="stats-section">
+        <h2>{{ visitor_name }} - Player Aggregates</h2>
+        {{ visitor_player_table_html | safe }} {# RESTORED safe filter #}
+    </div>
 
-    <h3>On/Off Net Rating</h3>
-    {{ on_off_table_html | safe }}
+    <div class="stats-section">
+        <h2>Advanced Stats ({{ target_team_name_for_adv_stats }})</h2>
+        <p><em>Note: On/Off, Lineup, and Pairwise stats are currently calculated for {{ target_team_name_for_adv_stats }}.</em></p>
 
-    <h3>Top Lineups (by Net Rating)</h3>
-    {{ lineup_table_html | safe }}
+        <h3>On/Off Net Rating</h3>
+        {{ on_off_table_html | safe }}
+
+        <h3>Top Lineups (by Net Rating)</h3>
+        {{ lineup_table_html | safe }}
+    </div>
+
 
     <h2>Charts</h2>
 
@@ -1481,30 +1492,250 @@ def _generate_single_report(
         )
         return None  # Indicate failure
 
-    # --- Calculate Stats for the target team in this match ---
+    # --- Determine Opponent and Load Seasonal Stats ---
+    try:
+        visitor_team_id = str(int(float(match_info_row.get("visitor_team_id", ""))))
+    except (ValueError, TypeError):
+        visitor_team_id = str(match_info_row.get("visitor_team_id", ""))
+
+    is_target_local = target_team_id == local_team_id
+    opponent_team_id = visitor_team_id if is_target_local else local_team_id
+
+    # --- Find Match-Specific Team Data and Names --- #
+    target_stats_match = None
+    opponent_stats_match = None
+    target_name_match = "Target Team"  # Default
+    opponent_name_match = "Opponent"  # Default
+    if "teams" in match_stats and len(match_stats["teams"]) == 2:
+        team1_stats = match_stats["teams"][0]
+        team2_stats = match_stats["teams"][1]
+        if str(team1_stats.get("teamIdExtern")) == target_team_id:
+            target_stats_match = team1_stats
+            opponent_stats_match = team2_stats
+        elif str(team2_stats.get("teamIdExtern")) == target_team_id:
+            target_stats_match = team2_stats
+            opponent_stats_match = team1_stats
+
+        if target_stats_match:
+            target_name_match = target_stats_match.get("name", target_name_match)
+        if opponent_stats_match:
+            opponent_name_match = opponent_stats_match.get("name", opponent_name_match)
+    else:
+        logger.warning(
+            f"Could not find two teams in match_stats for {match_id}, using default names."
+        )
+    # --- End Finding Match-Specific Team Data --- #
+
+    # Load seasonal stats (existing logic)
+    team_stats_dir = moves_dir.parent / "team_stats"  # Derive path
+    opponent_stats_data = (
+        load_team_stats(opponent_team_id, args.season, team_stats_dir)
+        if opponent_team_id
+        else None
+    )
+
+    # ... (rest of seasonal average calculations) ...
+    # --- Calculate Seasonal Averages per Player --- #
+    # REMOVED - Seasonal player averages are not currently used
+
+    # --- Calculate Opponent Team Avg PPG (Reinstate) ---
+    # ... (Calculation for opponent_avg_ppg remains here) ...
+    opponent_avg_ppg = None
+    if opponent_stats_data and "team" in opponent_stats_data:
+        # ... (code to calculate opponent_avg_ppg) ...
+        opp_team_info = opponent_stats_data["team"]
+        opp_total_pts = opp_team_info.get("totalScore")
+        opp_games_played = opp_team_info.get("sumMatches")
+        if (
+            opp_total_pts is not None
+            and opp_games_played is not None
+            and opp_games_played > 0
+        ):
+            try:
+                opponent_avg_ppg = round(
+                    float(opp_total_pts) / float(opp_games_played), 1
+                )
+            except (ValueError, TypeError):
+                pass
+
+    # --- Calculate Target Team Game Stats ---
+    # ... (calc instantiation and process call) ...
     calc = StatsCalculator(target_team_id)
     single_match_schedule_df = pd.DataFrame([match_info_row])
     calc.process(
-        single_match_schedule_df, {match_id: match_moves}, {match_id: match_stats}
+        single_match_schedule_df,
+        {match_id: match_moves} if match_moves else {},
+        {match_id: match_stats},
     )
+
+    # --- Calculate Opponent Team Game Stats (for minutes) ---
+    opponent_calc = None
+    opponent_internal_id = (
+        opponent_stats_match.get("teamIdIntern") if opponent_stats_match else None
+    )
+    # Ensure we have the opponent's schedule ID and internal ID before calculating
+    if opponent_team_id and opponent_internal_id and match_moves and match_stats:
+        logger.debug(
+            f"Calculating opponent ({opponent_team_id} / internal {opponent_internal_id}) stats for minutes..."
+        )
+        # Initialize calculator with opponent's schedule ID (external ID)
+        opponent_calc = StatsCalculator(opponent_team_id)
+        opponent_schedule_df = pd.DataFrame([match_info_row])  # Use the same match row
+        # Process method will use the schedule ID to find the correct internal ID within match_stats
+        opponent_calc.process(
+            opponent_schedule_df, {match_id: match_moves}, {match_id: match_stats}
+        )
+        logger.debug("Finished calculating opponent stats for minutes.")
+    else:
+        logger.warning(
+            f"Skipping opponent stats calculation for {match_id} - missing ID mapping or data."
+        )
 
     # --- Generate Report Components ---
 
-    # 1. Summary MD
-    summary_content = generate_summary_md(match_info_row, match_stats, target_team_id)
-    summary_md_path = match_output_dir / "summary.md"
-    summary_md_path.write_text(summary_content, encoding="utf-8")
-    summary_html = markdown2.markdown(summary_content, extras=["tables"])
+    # 1. Generate Team Comparison HTML directly
+    team_comparison_html = "<p>(Team comparison data not available)</p>"
+    # Use the already determined target_stats_match and opponent_stats_match
+    if target_stats_match and opponent_stats_match:
+        ts_data = target_stats_match.get("data", {})
+        os_data = opponent_stats_match.get("data", {})
+        # Names target_name_match and opponent_name_match are already defined
 
-    # 2. Stats Tables
-    player_df = calc.player_table()
+        # --- Opponent Averages (for table display) --- #
+        # ... (Get opp_avg_t1, opp_avg_t2, etc. from opponent_stats_data) ...
+        opp_avg_t1, opp_avg_t2, opp_avg_t3, opp_avg_fouls = None, None, None, None
+        if opponent_stats_data and "team" in opponent_stats_data:
+            opp_team_info = opponent_stats_data["team"]
+            try:
+                opp_avg_t1 = float(
+                    opp_team_info.get("shotsOfOneSuccessfulAvgByMatch", 0)
+                )
+                opp_avg_t2 = float(
+                    opp_team_info.get("shotsOfTwoSuccessfulAvgByMatch", 0)
+                )
+                opp_avg_t3 = float(
+                    opp_team_info.get("shotsOfThreeSuccessfulAvgByMatch", 0)
+                )
+                opp_avg_fouls = float(opp_team_info.get("totalFoulsAvgByMatch", 0))
+            except (ValueError, TypeError):
+                pass  # Already logged
+
+        # ... (Format display strings: opp_score_display, opp_t1_display, etc. using averages)
+        opp_score_display = str(os_data.get("score", "?"))
+        if opponent_avg_ppg is not None:
+            opp_score_display += f" (Avg: {opponent_avg_ppg:.1f})"
+        opp_t1_display = f"{os_data.get('shotsOfOneSuccessful', '?')}/{os_data.get('shotsOfOneAttempted', '?')}"
+        if opp_avg_t1 is not None:
+            opp_t1_display += f" (Avg M: {opp_avg_t1:.1f})"
+        opp_t2_made_display = str(os_data.get("shotsOfTwoSuccessful", "?"))
+        if opp_avg_t2 is not None:
+            opp_t2_made_display += f" (Avg: {opp_avg_t2:.1f})"
+        opp_t3_made_display = str(os_data.get("shotsOfThreeSuccessful", "?"))
+        if opp_avg_t3 is not None:
+            opp_t3_made_display += f" (Avg: {opp_avg_t3:.1f})"
+        opp_fouls_display = str(os_data.get("faults", "?"))
+        if opp_avg_fouls is not None:
+            opp_fouls_display += f" (Avg: {opp_avg_fouls:.1f})"
+
+        rows = [
+            f"<tr><th>Stat</th><th>{target_name_match}</th><th>{opponent_name_match}</th></tr>",
+            f"<tr><td>Points</td><td>{ts_data.get('score', '?')}</td><td>{opp_score_display}</td></tr>",
+            f"<tr><td>T2 Made</td><td>{ts_data.get('shotsOfTwoSuccessful', '?')}</td><td>{opp_t2_made_display}</td></tr>",
+            f"<tr><td>T3 Made</td><td>{ts_data.get('shotsOfThreeSuccessful', '?')}</td><td>{opp_t3_made_display}</td></tr>",
+            f"<tr><td>T1 M/A</td><td>{ts_data.get('shotsOfOneSuccessful', '?')}/{ts_data.get('shotsOfOneAttempted', '?')}</td><td>{opp_t1_display}</td></tr>",
+            f"<tr><td>Fouls</td><td>{ts_data.get('faults', '?')}</td><td>{opp_fouls_display}</td></tr>",
+        ]
+        team_comparison_html = f"<h2>Team Stat Comparison</h2><table class='comparison-table'>{''.join(rows)}</table>"
+    # else block was removed previously
+
+    # 2. Generate Target Team Player Aggregates HTML (Game Stats Only)
+    player_df = calc.player_table()  # Game stats calculated via StatsCalculator
+    player_table_html = "<p>(Target team player data not available)</p>"
+    if player_df is not None and not player_df.empty:
+        logger.debug(
+            f"Match {match_id} - Target Player DF:\n{player_df.to_string()}"
+        )  # DEBUG
+        player_table_html = player_df.to_html(
+            index=False, classes="stats-table", border=0
+        )
+    else:
+        logger.debug(f"Match {match_id} - Target Player DF is None or empty.")  # DEBUG
+
+    # 3. Generate Opponent Player Aggregates HTML (Game Stats Only - mirroring target table)
+    opponent_box_html = "<p>(Opponent player stats not available)</p>"
+    opponent_player_df = pd.DataFrame()  # Initialize empty
+
+    if opponent_calc:
+        # Primary method: Use the calculated stats from opponent_calc
+        opponent_player_df = opponent_calc.player_table()
+        if opponent_player_df is not None and not opponent_player_df.empty:
+            opponent_box_html = opponent_player_df.to_html(
+                index=False, classes="stats-table", border=0
+            )
+        else:
+            logger.debug(
+                f"Match {match_id} - Opponent Player DF (Calculated) is None or empty. Attempting fallback."
+            )
+            opponent_player_df = pd.DataFrame()  # Reset for fallback check
+
+    # Fallback method: If opponent_calc failed or returned empty, try using match_stats
+    if (
+        opponent_player_df.empty
+        and opponent_stats_match
+        and "players" in opponent_stats_match
+    ):
+        logger.warning(
+            f"Match {match_id} - Fallback: Generating opponent stats from match_stats JSON."
+        )
+        opp_players_data = []
+        for player in opponent_stats_match.get("players", []):
+            player_name = player.get("name", "Unknown")
+            player_num = player.get("shirtNumber", "??")
+            player_data = player.get("data", {})
+
+            # Fallback minutes calculation (already implemented)
+            mins_played = 0
+            secs_played = player_data.get("totalSecondsPlayed")
+            if secs_played is not None:
+                try:
+                    mins_played = round(float(secs_played) / 60)
+                except (ValueError, TypeError):
+                    mins_played = player_data.get("minutes", 0)
+            else:
+                mins_played = player_data.get("minutes", 0)
+
+            opp_players_data.append(
+                {
+                    "Player": shorten_name(player_name),
+                    "#": player_num,
+                    "Mins": mins_played,
+                    "PTS": player_data.get("score", 0),
+                    "T3": player_data.get("shotsOfThreeSuccessful", 0),
+                    "T2": player_data.get("shotsOfTwoSuccessful", 0),
+                    "T1": player_data.get("shotsOfOneSuccessful", 0),
+                    "Fouls": player_data.get("faults", 0),
+                    "+/-": player_data.get(
+                        "plusMinus", 0
+                    ),  # Note: +/- from match_stats might differ from calculated
+                }
+            )
+
+        if opp_players_data:
+            opponent_player_df = pd.DataFrame(opp_players_data)
+            opponent_player_df = opponent_player_df.sort_values(
+                "PTS", ascending=False
+            ).reset_index(drop=True)
+            logger.debug(
+                f"Match {match_id} - Opponent Player DF (Fallback from JSON):\n{opponent_player_df.to_string()}"
+            )  # DEBUG
+            opponent_box_html = opponent_player_df.to_html(
+                index=False, classes="stats-table", border=0
+            )
+        # If still empty after fallback, the default message remains
+
+    # 5. Other Tables (On/Off, Lineups)
     onoff_df = calc.on_off_table()
     lineup_df = calc.lineup_table()
-    player_table_html = (
-        player_df.to_html(index=False, classes="stats-table", border=0)
-        if not player_df.empty
-        else "<p>(No player data)</p>"
-    )
     on_off_table_html = (
         onoff_df.to_html(index=False, classes="stats-table", border=0)
         if not onoff_df.empty
@@ -1516,44 +1747,47 @@ def _generate_single_report(
         else "<p>(No lineup data)</p>"
     )
 
-    # 3. AI Summary (Cached)
+    # 6. AI Summary (Cached)
+    # ... (Ensure generate_llm_summary uses only team avg ppg if needed, not player avgs) ...
     llm_summary_text = None
     llm_summary_md_path = match_output_dir / "llm_summary.md"
+    # ... (rest of LLM caching logic) ...
     if llm_summary_md_path.exists():
         try:
             llm_summary_text = llm_summary_md_path.read_text(encoding="utf-8").strip()
-            if llm_summary_text:
-                logger.info(f"Using cached LLM summary from: {llm_summary_md_path}")
-            else:
-                logger.warning(
-                    f"Cached LLM summary file is empty: {llm_summary_md_path}. Will attempt regeneration."
-                )
+            if not llm_summary_text:
                 llm_summary_text = None
-        except Exception as e:
-            logger.error(
-                f"Error reading cached LLM summary {llm_summary_md_path}: {e}. Will attempt regeneration."
-            )
+        except Exception:
             llm_summary_text = None
 
-    if llm_summary_text is None:
+    if llm_summary_text is None and match_moves:
         logger.info("LLM summary cache not found or invalid. Generating...")
         llm_summary_text = generate_llm_summary(
-            match_info_row, match_stats, target_team_id, player_df
+            match_info_row,
+            match_stats,
+            target_team_id,
+            player_df,
+            opponent_avg_ppg,  # Pass TEAM avg ppg
         )
         if llm_summary_text:
             try:
                 llm_summary_md_path.write_text(llm_summary_text, encoding="utf-8")
-                logger.info(
-                    f"Saved newly generated LLM summary to: {llm_summary_md_path}"
-                )
             except Exception as e:
                 logger.error(
                     f"Error writing LLM summary cache {llm_summary_md_path}: {e}"
                 )
+    elif not match_moves:
+        logger.warning(
+            f"Skipping LLM summary generation for {match_id} due to missing moves data."
+        )
 
-    # 4. Charts
+    # 7. Charts
+    # ... (Existing chart logic) ...
     score_timeline_path_rel = plot_score_timeline(
-        match_moves, match_stats, match_output_dir, target_team_id
+        match_moves if match_moves else [],
+        match_stats,
+        match_output_dir,
+        target_team_id,
     )
     pairwise_heatmap_path_rel = plot_pairwise_heatmap(
         calc.pairwise_minutes(), match_output_dir
@@ -1562,9 +1796,10 @@ def _generate_single_report(
     lineup_chart_path_rel = plot_lineup_netrtg(lineup_df, match_output_dir)
 
     # --- Get Context for Rendering ---
+    # ... (Existing context setup) ...
     local_name = match_info_row.get("local_team", "Local Team")
     visitor_name = match_info_row.get("visitor_team", "Visitor Team")
-    target_team_name = local_name if target_team_id == local_team_id else visitor_name
+    target_team_name = local_name if is_target_local else visitor_name
     match_date = match_info_row.get("date_time", "Unknown Date")
     score = match_info_row.get("score", "-")
     group_name = f"Group {gid}"
@@ -1578,8 +1813,10 @@ def _generate_single_report(
             target_team_name=target_team_name,
             local_name=local_name,
             visitor_name=visitor_name,
-            summary_html=summary_html,
-            player_table_html=player_table_html,
+            team_comparison_html=team_comparison_html,
+            player_table_html=player_table_html,  # Target game stats
+            opponent_box_html=opponent_box_html,  # Opponent game stats, mirrored format
+            # opponent_perf_vs_avg_html=opponent_perf_vs_avg_html, # REMOVED
             on_off_table_html=on_off_table_html,
             lineup_table_html=lineup_table_html,
             score_timeline_path=score_timeline_path_rel,
@@ -1589,6 +1826,14 @@ def _generate_single_report(
             season=args.season,
             llm_summary=llm_summary_text,
         )
+        # --- Debug HTML Content Before Writing ---
+        logger.debug(
+            f"Match {match_id} - Local HTML Table Content:\n{player_table_html}"
+        )
+        logger.debug(
+            f"Match {match_id} - Visitor HTML Table Content:\n{opponent_box_html}"
+        )
+        # --- End Debug ---
         report_html_path = match_output_dir / "report.html"
         report_html_path.write_text(html_content, encoding="utf-8")
         logger.info(f"-> Successfully generated report: {report_html_path}")
@@ -1630,12 +1875,6 @@ def main() -> None:
     parser.add_argument(
         "--season", default="2024", help="Season identifier (default: 2024)"
     )
-    # parser.add_argument(
-    #     "--exclude-players", # Maybe add later if needed for individual reports
-    #     nargs='+',
-    #     default=[],
-    #     help="List of player UUIDs to exclude from reports",
-    # )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -1646,7 +1885,7 @@ def main() -> None:
 
     env = Environment(
         loader=None, autoescape=select_autoescape(["html", "xml"])
-    )  # Loader=None as template is string
+    )
     template = env.from_string(HTML_TEMPLATE)
 
     logger.info(f"Starting report generation for Team ID: {target_team_id}")
