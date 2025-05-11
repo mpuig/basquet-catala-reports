@@ -31,27 +31,18 @@ class StatsCalculator:
         self.pairwise_secs: Dict[str, Dict[str, float]] = defaultdict(
             lambda: defaultdict(float)
         )
-        # --- On/Off tracking ---
-        self.on_secs: Dict[str, float] = defaultdict(
-            float
-        )  # seconds with player ON court
-        self.on_pts_f: Dict[str, int] = defaultdict(int)  # points for while ON
-        self.on_pts_a: Dict[str, int] = defaultdict(int)  # points against while ON
-        self.team_pts_f: int = 0  # total points for (team)
-        self.team_pts_a: int = 0  # total points against
-        # --- Evolution & lineup tracking ---
-        self.game_log: List[dict] = []  # one row per player per game
+        self.on_secs: Dict[str, float] = defaultdict(float)
+        self.on_pts_f: Dict[str, int] = defaultdict(int)
+        self.on_pts_a: Dict[str, int] = defaultdict(int)
+        self.team_pts_f: int = 0
+        self.team_pts_a: int = 0
+        self.game_log: List[dict] = []
         self.lineup_stats: Dict[tuple, Dict[str, Any]] = defaultdict(
             lambda: {"secs": 0.0, "pts_for": 0, "pts_against": 0}
         )
-        self.plus_minus: Dict[str, int] = defaultdict(int)  # +/- por jugadora
-        # --- Game-level summary ---
-        self.game_summaries: List[dict] = (
-            []
-        )  # Store {'game_idx': int, 'opponent_pts': int}
-        self.processed_matches: set[str] = (
-            set()
-        )  # Track processed match IDs for summaries
+        self.plus_minus: Dict[str, int] = defaultdict(int)
+        self.game_summaries: List[dict] = []
+        self.processed_matches: set[str] = set()
 
     # ==================================================================
     # Public API
@@ -270,27 +261,34 @@ class StatsCalculator:
         event: dict,
         actor_name: str,
         event_abs_seconds: float,
-        player_state: Dict[str, Dict],
-        on_court: Set[str],
+        player_state: Dict[str, Dict], # Tracks {'status', 'since', 'number'} for current game
+        on_court: Set[str],             # Players currently on court for current game
         per_game_minutes: Dict[str, float],
         per_game_points: Dict[str, int],
     ) -> None:
         """Handles player-specific stats (points, fouls) and substitutions."""
         event_type = event.get("move", "")
+        period = event.get("period", 0)
+        minute = event.get("min", 0)
+        second = event.get("sec", 0)
         actor_num = event.get("actorShirtNumber")
 
-        # Ensure player is tracked
+        # Ensure player is tracked in the main aggregate (self.players)
         if actor_name not in self.players:
-            self.players[actor_name] = PlayerAggregate(number=actor_num)
+            self.players[actor_name] = PlayerAggregate(number=actor_num, name=actor_name)
         elif self.players[actor_name].number is None and actor_num is not None:
             self.players[actor_name].number = actor_num
 
         pa = self.players[actor_name]
+
+        # Player state for the current game:
+        # 'setdefault' initializes with 'since: 0.0'. This is crucial for correctly
+        # identifying game starters if their first event isn't "Entra al camp".
         st = player_state.setdefault(
             actor_name, {"status": "out", "since": 0.0, "number": actor_num}
         )
 
-        # --- Handle Player Stats ---
+        # --- Handle Player Stats (Points, Fouls) ---
         if event_type in ["Cistella de 3", "Triple"]:
             pa.t3 += 1
             pa.pts += 3
@@ -303,27 +301,75 @@ class StatsCalculator:
             pa.t1 += 1
             pa.pts += 1
             per_game_points[actor_name] += 1
-        elif event_type.startswith("Personal"):  # Corrected check
+        elif event_type.startswith(self.foul_keywords): # Use class attribute foul_keywords
             pa.fouls += 1
 
-        # --- Handle Substitutions ---
+        # --- Handle Minutes Played & Pairwise ---
         if event_type == "Entra al camp":
-            if st["status"] == "out":
-                st["status"] = "in"
-                st["since"] = event_abs_seconds
-                for other_player in on_court:  # Update pairwise for new player
-                    self._credit_pairwise_secs(actor_name, other_player, 0)
-                on_court.add(actor_name)
+            # Player is explicitly entering. Mark as 'in' from this event's time.
+            if st["status"] == "out": # Standard case: player was out, now in.
+                if actor_name not in on_court:
+                    on_court.add(actor_name)
+            elif st["status"] == "in": # Already 'in', possibly redundant event or error in data.
+                logger.debug(f"Player {actor_name} ({st.get('number')}) 'Entra al camp' at P{period} {minute:02d}:{second:02d} but status already 'in'. 'since' will be updated.")
+                if actor_name not in on_court: # Ensure consistency
+                    on_court.add(actor_name)
+
+            st["status"] = "in"
+            st["since"] = event_abs_seconds # This is the definitive start of this stint
+
         elif event_type == "Surt del camp":
-            if st["status"] == "in":
-                duration = event_abs_seconds - st["since"]
-                self._credit_minutes(actor_name, duration)
-                per_game_minutes[actor_name] += duration
-                on_court.remove(actor_name)
-                for other_player in on_court:  # Update pairwise for leaving player
-                    self._credit_pairwise_secs(actor_name, other_player, duration)
-                st["status"] = "out"
+            duration_to_credit = 0.0
+            entry_time_for_stint = st["since"] # 'since' should hold the start time of the current stint
+
+            if st["status"] == "in": # Ideal case: player was correctly tracked as 'in'.
+                if entry_time_for_stint < event_abs_seconds:
+                    duration_to_credit = event_abs_seconds - entry_time_for_stint
+                else: # e.g. Surt event at same time as Entra, or data issue
+                    logger.warning(f"Player {actor_name} ({st.get('number')}) 'Surt del camp' (status 'in') at P{period} {minute:02d}:{second:02d} (abs: {event_abs_seconds:.0f}), "
+                                   f"but 'since' ({entry_time_for_stint:.2f}s) not validly before. Duration 0.")
+            elif st["status"] == "out": # Status was 'out', implies missed "Entra" or was a starter.
+                                        # 'entry_time_for_stint' (from st["since"]) should be 0.0 for starters,
+                                        # or the time of a previous action that made them 'in'.
+                if entry_time_for_stint < event_abs_seconds:
+                    duration_to_credit = event_abs_seconds - entry_time_for_stint
+                    logger.info( # Info log to confirm time is being credited for this scenario
+                        f"Player {actor_name} ({st.get('number')}) 'Surt del camp' at P{period} {minute:02d}:{second:02d} (abs: {event_abs_seconds:.0f}) "
+                        f"but status was 'out'. Using 'since'={entry_time_for_stint:.0f}s as entry. Duration: {duration_to_credit:.0f}s."
+                    )
+                else: # This case (since >= event_abs_seconds when status 'out') should be rarer now
+                    logger.warning(f"Player {actor_name} ({st.get('number')}) 'Surt del camp' (status 'out') at P{period} {minute:02d}:{second:02d} (abs: {event_abs_seconds:.0f}), "
+                                   f"but 'since' ({entry_time_for_stint:.2f}s) not validly before event time. No time credited for this exit.")
+
+            if duration_to_credit > 0:
+                self._credit_minutes(actor_name, duration_to_credit)
+                per_game_minutes[actor_name] += duration_to_credit
+                if actor_name in on_court: # Player was on court
+                    on_court.remove(actor_name) # Remove after crediting time for the stint
+                    # Credit pairwise for the duration they played with others who are still on court
+                    for other_player in list(on_court):
+                        self._credit_pairwise_secs(actor_name, other_player, duration_to_credit)
+                # If status was 'out' but duration_to_credit > 0, they were implicitly on court.
+                # on_court set might be out of sync if their 'Entra' was missed.
+                # Pairwise for this specific case (status 'out' but time credited) is tricky
+                # as they wouldn't have been in 'on_court' to establish pairs when others entered/exited.
+                # The current pairwise credits based on who is left in `on_court`.
+
+            st["status"] = "out" # Player is now definitely out
+            st["since"] = event_abs_seconds # Record this exit time
+
+        elif st["status"] == "out": # Any other action (not "Entra al camp" or "Surt del camp")
+                                    # by a player who was recorded as 'out'.
+            # This player is now considered active on the court.
+            st["status"] = "in"
+            # If 'st["since"]' is 0.0 (game starter default from setdefault), that's their correct entry time.
+            # Otherwise, if 'st["since"]' holds a previous exit time, this new action means they've re-entered;
+            # their new stint effectively starts from this current event's time.
+            if st["since"] != 0.0:
                 st["since"] = event_abs_seconds
+
+            if actor_name not in on_court:
+                on_court.add(actor_name)
 
     def _finalize_game_metrics(
         self,
@@ -395,7 +441,32 @@ class StatsCalculator:
     # ==================================================================
     # Table Generation & Accessors (Mostly unchanged)
     # ==================================================================
-    # def evolution_table(...) - Removed as not applicable
+    # ------------------------------------------------------------------
+    # Evolution (rolling) table
+    # ------------------------------------------------------------------
+    def evolution_table(self, names_to_exclude: set[str] = set()) -> pd.DataFrame:
+        # Filter game log *before* creating DataFrame
+        filtered_log = [
+            row for row in self.game_log if row["player"] not in names_to_exclude
+        ]
+        df = pd.DataFrame(filtered_log)
+        if df.empty:
+            return df
+        df.sort_values("game_idx", inplace=True)
+        df["roll_pts"] = df.groupby("player")["pts"].transform(
+            lambda s: s.rolling(3, 1).mean()
+        )
+        df["roll_mins"] = df.groupby("player")["mins"].transform(
+            lambda s: s.rolling(3, 1).mean()
+        )
+        df["roll_pm"] = df.groupby("player")["+/-"].transform(
+            lambda s: s.rolling(3, 1).mean()
+        )
+        df["roll_drtg"] = df.groupby("player")["drtg"].transform(
+            lambda s: s.rolling(window=3, min_periods=1).mean()
+        )
+        return df
+
 
     def lineup_table(
         self,
@@ -465,9 +536,18 @@ class StatsCalculator:
             return df  # nothing to sort
         return df.sort_values("NetRtg", ascending=False).reset_index(drop=True)
 
+
     def _credit_minutes(self, player: str, secs: float) -> None:
+        # Ensure player exists in self.players before trying to merge seconds
+        if player not in self.players:
+            # This might happen if a player has substitution events but no other stat-generating events
+            # and wasn't pre-initialized. For safety, ensure they exist.
+            # The number might be unknown here if not in the event.
+            self.players[player] = PlayerAggregate(name=player)  # Or try to get number from player_state
+
         pa = self.players[player]
         pa.merge_secs(secs)
+
 
     def _credit_pairwise_secs(self, p1: str, p2: str, secs: float) -> None:
         """Adds played time to the pairwise matrix (for p1<->p2)."""

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 class PlayerAggregate:
     """Holds aggregated statistics for a single player."""
 
+    name: str
     number: str = "??"
     gp: int = 0
     secs_played: float = 0.0
