@@ -17,8 +17,6 @@ CLI examples
    $ python fetch_data.py --groups 17182 18299 --season 2024
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging
@@ -54,7 +52,9 @@ STATS_BASE_URL = "https://msstats.optimalwayconsulting.com/v1/fcbq/"
 MATCH_MOVES_URL = STATS_BASE_URL + "getJsonWithMatchMoves/{match_id}?currentSeason=true"
 MATCH_STATS_URL = STATS_BASE_URL + "getJsonWithMatchStats/{match_id}?currentSeason=true"
 TEAM_STATS_URL = STATS_BASE_URL + "team-stats/team/{team_id}/season/{season_id}"
-PLAYER_STATS_URL = STATS_BASE_URL + "player-stats/federated/{player_uuid}/team/{team_id}"
+PLAYER_STATS_URL = (
+    STATS_BASE_URL + "player-stats/federated/{player_uuid}/team/{team_id}"
+)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; basquetcatala-bot/1.0; +https://github.com)"
 }

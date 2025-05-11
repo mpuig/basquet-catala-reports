@@ -21,3 +21,17 @@ class PlayerAggregate:
     @property
     def minutes(self) -> int:
         return round(self.secs_played / 60)
+
+
+@dataclass
+class Scores:
+    avg_ppg: float
+    avg_t1: float
+    avg_t2: float
+    avg_t3: float
+    avg_fouls: float
+    score: int
+    t1: int
+    t2: int
+    t3: int
+    faults: int

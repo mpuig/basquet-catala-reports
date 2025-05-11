@@ -29,16 +29,14 @@ CLI Usage Examples:
     $ python generate_match_reports.py --team 69630 --groups 17182 --season 2023
 """
 
-from __future__ import annotations
-
 import argparse
-from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Any, Optional
 
 import pandas as pd
 from jinja2 import Environment, select_autoescape, Template
 
+from report_tools.models import Scores
 from report_tools.data_loaders import (
     load_schedule,
     load_match_moves,
@@ -125,20 +123,6 @@ def generate_summary_md(
     return "\n".join(summary_lines)
 
 
-@dataclass
-class Scores:
-    avg_ppg: float
-    avg_t1: float
-    avg_t2: float
-    avg_t3: float
-    avg_fouls: float
-    score: int
-    t1: int
-    t2: int
-    t3: int
-    faults: int
-
-
 def build_scores_from_dict(team_info, stats_match) -> Scores:
     stats = stats_match.get("data", {})
 
@@ -148,11 +132,11 @@ def build_scores_from_dict(team_info, stats_match) -> Scores:
         avg_t2=round(team_info.get("shotsOfTwoSuccessfulAvgByMatch"), 1),
         avg_t3=round(team_info.get("shotsOfThreeSuccessfulAvgByMatch"), 1),
         avg_fouls=round(team_info.get("totalFoulsAvgByMatch"), 1),
-        score=stats.get('score', '?'),
-        t1=stats.get('shotsOfOneSuccessful', '?'),
-        t2=stats.get('shotsOfTwoSuccessful', '?'),
-        t3=stats.get('shotsOfThreeSuccessful', '?'),
-        faults=stats.get('faults', '?'),
+        score=stats.get("score", "?"),
+        t1=stats.get("shotsOfOneSuccessful", "?"),
+        t2=stats.get("shotsOfTwoSuccessful", "?"),
+        t3=stats.get("shotsOfThreeSuccessful", "?"),
+        faults=stats.get("faults", "?"),
     )
 
 
@@ -195,33 +179,54 @@ def _generate_single_report(
     match_date = match_info_row.get("date_time", "Unknown Date")
     score = match_info_row.get("score", "-")
 
-    team_comparison_html = build_team_comparison_html(local_name, local_team_id, match_stats, moves_dir, season,
-                                                      visitor_name,
-                                                      visitor_team_id)
+    team_comparison_html = build_team_comparison_html(
+        local_name,
+        local_team_id,
+        match_stats,
+        moves_dir,
+        season,
+        visitor_name,
+        visitor_team_id,
+    )
     # 2. Generate Team Player Aggregates HTMLs
-    local_calc = calculate_stats(local_team_id, match_id, match_info_row, match_moves, match_stats)
+    local_calc = calculate_stats(
+        local_team_id, match_id, match_info_row, match_moves, match_stats
+    )
 
     local_table_html = local_calc.player_table().to_html(
         index=False, classes="stats-table", border=0
     )
 
-    visitor_calc = calculate_stats(visitor_team_id, match_id, match_info_row, match_moves, match_stats)
+    visitor_calc = calculate_stats(
+        visitor_team_id, match_id, match_info_row, match_moves, match_stats
+    )
     visitor_table_html = visitor_calc.player_table().to_html(
         index=False, classes="stats-table", border=0
     )
 
     # 5. Other Tables (On/Off, Lineups)
-    target_calc = calculate_stats(target_team_id, match_id, match_info_row, match_moves, match_stats)
+    target_calc = calculate_stats(
+        target_team_id, match_id, match_info_row, match_moves, match_stats
+    )
     target_player_df = target_calc.player_table()
 
     onoff_df = target_calc.on_off_table()
     lineup_df = target_calc.lineup_table()
     on_off_table_html = onoff_df.to_html(index=False, classes="stats-table", border=0)
-    lineup_table_html = lineup_df.head(5).to_html(index=False, classes="stats-table", border=0)
+    lineup_table_html = lineup_df.head(5).to_html(
+        index=False, classes="stats-table", border=0
+    )
 
     # 6. LLM Summary
-    llm_summary_text = build_llm_summary_text(match_id, match_info_row, match_moves, match_output_dir, match_stats,
-                                              target_player_df, target_team_id)
+    llm_summary_text = build_llm_summary_text(
+        match_id,
+        match_info_row,
+        match_moves,
+        match_output_dir,
+        match_stats,
+        target_player_df,
+        target_team_id,
+    )
 
     # 7. Charts
     score_timeline_path_rel = plot_score_timeline(
@@ -279,8 +284,15 @@ def _generate_single_report(
     }
 
 
-def build_llm_summary_text(match_id, match_info_row, match_moves, match_output_dir, match_stats, target_player_df,
-                           target_team_id):
+def build_llm_summary_text(
+    match_id,
+    match_info_row,
+    match_moves,
+    match_output_dir,
+    match_stats,
+    target_player_df,
+    target_team_id,
+):
     llm_summary_text = None
     llm_summary_md_path = match_output_dir / "llm_summary.md"
     if llm_summary_md_path.exists():
@@ -323,8 +335,15 @@ def calculate_stats(team_id, match_id, match_info_row, match_moves, match_stats)
     return calc
 
 
-def build_team_comparison_html(local_name, local_team_id, match_stats, moves_dir, season, visitor_name,
-                               visitor_team_id):
+def build_team_comparison_html(
+    local_name,
+    local_team_id,
+    match_stats,
+    moves_dir,
+    season,
+    visitor_name,
+    visitor_team_id,
+):
     team1_stats = match_stats["teams"][0]
     team2_stats = match_stats["teams"][1]
     local_stats_match = None

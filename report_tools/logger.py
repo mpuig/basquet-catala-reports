@@ -6,5 +6,5 @@ logging.basicConfig(
     format="%(levelname)s | %(name)s | %(asctime)s | %(message)s",
     stream=sys.stderr,
 )
-logging.getLogger('matplotlib').setLevel(logging.WARNING)
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
 logger = logging.getLogger("match_report_generator")
