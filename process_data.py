@@ -1181,6 +1181,8 @@ def plot_evolution(
     df_melt_mins["player"] = df_melt_mins["player"].apply(shorten_name)
     df_melt_pts["player"] = df_melt_pts["player"].apply(shorten_name)
 
+    sorted_players = sorted(df_melt_mins["player"].unique())
+
     # --- Plot Minutes ---
     try:
         logger.info("Generating Minutes evolution plot for group %s...", group_name)
@@ -1192,6 +1194,7 @@ def plot_evolution(
             hue="player",  # Color lines by player
             style="Metric_Type",  # Different style for actual vs rolling
             col="player",
+            col_order=sorted_players,
             col_wrap=4,  # Facet by player, 4 columns wide
             kind="line",
             height=3,
@@ -1229,6 +1232,7 @@ def plot_evolution(
             hue="player",
             style="Metric_Type",
             col="player",
+            col_order=sorted_players,
             col_wrap=4,
             kind="line",
             height=3,
@@ -1273,6 +1277,7 @@ def plot_evolution(
                 hue="player",
                 style="Metric_Type",
                 col="player",
+                col_order=sorted_players,
                 col_wrap=4,
                 kind="line",
                 height=3,
@@ -1492,7 +1497,7 @@ def plot_player_on_net(
         return
 
     # Sort by On_Net for plotting
-    onoff_df_sorted = onoff_df.sort_values("On_Net", ascending=False)
+    onoff_df_sorted = onoff_df.sort_values("On_Net", ascending=False).reset_index(drop=True)
 
     plot_dir.mkdir(parents=True, exist_ok=True)
     filename = plot_dir / f"barchart_player_on_net_group_{gid}.png"
@@ -1508,15 +1513,14 @@ def plot_player_on_net(
             legend=False,
         )
         # Add value labels on bars
-        for index, row in onoff_df_sorted.iterrows():
+        for bar, value in zip(barplot.patches, onoff_df_sorted["On_Net"]):
             barplot.text(
-                index,
-                row.On_Net
-                + (1 if row.On_Net >= 0 else -1),  # Adjust position based on value
-                f"{row.On_Net:.1f}",
-                color="black",
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + (1 if value >= 0 else -1),
+                f"{value:.1f}",
                 ha="center",
-                va="bottom" if row.On_Net >= 0 else "top",
+                va="bottom" if value >= 0 else "top",
+                color="black",
             )
 
         plt.title(f"Player On-Court Net Rating (per 40 min) - Group {group_name}")

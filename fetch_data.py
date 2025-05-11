@@ -14,7 +14,7 @@ CLI examples
    $ python fetch_data.py --groups 17182 18299 --mode schedule
 
 2) Fetch everything for a season
-   $ python fetch_data.py --groups 17182 18299 --season 2024 --mode all
+   $ python fetch_data.py --groups 17182 18299 --season 2024
 """
 
 from __future__ import annotations
@@ -49,26 +49,16 @@ log = logging.getLogger("fetch_data")
 ###############################################################################
 
 BASE_URL = "https://www.basquetcatala.cat/competicions/resultats/{group_id}/0"
-MATCH_MOVES_URL = (
-    "https://msstats.optimalwayconsulting.com/v1/fcbq/"
-    "getJsonWithMatchMoves/{match_id}?currentSeason=true"
-)
-MATCH_STATS_URL = (
-    "https://msstats.optimalwayconsulting.com/v1/fcbq/"
-    "getJsonWithMatchStats/{match_id}?currentSeason=true"
-)
-TEAM_STATS_URL = (
-    "https://msstats.optimalwayconsulting.com/v1/fcbq/"
-    "team-stats/team/{team_id}/season/{season_id}"
-)
-PLAYER_STATS_URL = (
-    "https://msstats.optimalwayconsulting.com/v1/fcbq/"
-    "player-stats/federated/{player_uuid}/team/{team_id}"
-)
 
+STATS_BASE_URL = "https://msstats.optimalwayconsulting.com/v1/fcbq/"
+MATCH_MOVES_URL = STATS_BASE_URL + "getJsonWithMatchMoves/{match_id}?currentSeason=true"
+MATCH_STATS_URL = STATS_BASE_URL + "getJsonWithMatchStats/{match_id}?currentSeason=true"
+TEAM_STATS_URL = STATS_BASE_URL + "team-stats/team/{team_id}/season/{season_id}"
+PLAYER_STATS_URL = STATS_BASE_URL + "player-stats/federated/{player_uuid}/team/{team_id}"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; basquetcatala-bot/1.0; +https://github.com)"
 }
+
 
 ###############################################################################
 # dataclass                                                                   #
@@ -357,7 +347,6 @@ def main() -> None:
     parser.add_argument(
         "--groups", nargs="+", required=True, help="Competition group IDs"
     )
-    parser.add_argument("--mode", choices=["schedule", "all"], default="schedule")
     parser.add_argument(
         "--season", default="2024", help="Season id for team/player stats"
     )
@@ -369,9 +358,7 @@ def main() -> None:
         log.info("=== Group %s ===", gid)
         matches = parse_group_schedule(gid)
         write_schedule_csv(matches, gid, out_root)
-
-        if args.mode == "all":
-            download_json_assets(matches, args.season, out_root)
+        download_json_assets(matches, args.season, out_root)
 
     log.info("Done.")
 
