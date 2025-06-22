@@ -44,9 +44,41 @@ jobs:
       - name: Install dependencies
         run: uv sync
       
-      - name: Generate basketball reports
+      - name: Check data directory
         run: |
-          uv run run.py --groups 17182 18299 --season 2024
+          echo "Checking for data directory..."
+          if [ -d "data" ]; then
+            echo "Data directory found!"
+            echo "Data directory contents:"
+            ls -la data/
+            echo "Match moves count: $(find data/match_moves/ -name "*.json" 2>/dev/null | wc -l || echo 0)"
+            echo "Match stats count: $(find data/match_stats/ -name "*.json" 2>/dev/null | wc -l || echo 0)"
+            echo "Team stats count: $(find data/team_stats/ -name "*.json" 2>/dev/null | wc -l || echo 0)"
+          else
+            echo "Data directory not found! This might be the issue."
+            echo "Available directories:"
+            ls -la
+          fi
+      
+      - name: Generate basketball reports
+        continue-on-error: true
+        run: |
+          echo "About to run report generation..."
+          echo "Current directory: $(pwd)"
+          echo "Python version: $(python --version)"
+          echo "Available space: $(df -h .)"
+          echo "Starting report generation with verbose output..."
+          uv run run.py --groups 17182 --season 2024 --verbose || {
+            echo "Report generation failed with exit code $?"
+            echo "Capturing error details..."
+            echo "Process list:"
+            ps aux || true
+            echo "Memory usage:"
+            free -h || true
+            echo "Disk usage:"
+            df -h || true
+            exit 1
+          }
       
       - name: Verify reports were generated
         run: |
