@@ -512,7 +512,6 @@ def test_calculate_on_off_stats_simple():
     # Skip the detailed assertions for now since the team ID mapping is complex
     # and the function returns empty DataFrame when it can't map team IDs correctly
     if not df.empty and "Player" in df.columns:
-        df_indexed = df.set_index("Player")
         # Test basic structure if data exists
         assert "Mins_ON" in df.columns
         assert "On_Net" in df.columns
@@ -667,5 +666,4 @@ def test_calculate_on_off_stats_simple():
 
     # Skip detailed assertions due to team mapping complexity
     if not df_zero_min.empty and "Player" in df_zero_min.columns:
-        df_zero_min_indexed = df_zero_min.set_index("Player")
         assert "Mins_ON" in df_zero_min.columns
