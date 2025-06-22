@@ -50,17 +50,38 @@ jobs:
       
       - name: Verify reports were generated
         run: |
+          echo "Current working directory:"
+          pwd
+          echo "Contents of current directory:"
+          ls -la
           echo "Checking if reports directory exists..."
-          ls -la reports/ || echo "Reports directory not found!"
-          echo "Checking for index.html..."
-          ls -la reports/index.html || echo "index.html not found!"
-          echo "Reports directory structure:"
-          find reports/ -type f -name "*.html" | head -10 || echo "No HTML files found!"
+          if [ -d "reports" ]; then
+            echo "Reports directory found!"
+            ls -la reports/
+            echo "Checking for index.html..."
+            if [ -f "reports/index.html" ]; then
+              echo "index.html found!"
+            else
+              echo "index.html not found!"
+            fi
+            echo "Reports directory structure:"
+            find reports/ -type f -name "*.html" | head -10
+            echo "Total HTML files: $(find reports/ -type f -name "*.html" | wc -l)"
+          else
+            echo "Reports directory not found!"
+            echo "Available directories:"
+            find . -type d -name "*report*" 2>/dev/null || echo "No report-related directories found"
+          fi
       
       - name: Add .nojekyll to reports directory
         run: |
-          touch reports/.nojekyll
-          echo "Added .nojekyll file to reports directory"
+          if [ -d "reports" ]; then
+            touch reports/.nojekyll
+            echo "Added .nojekyll file to reports directory"
+          else
+            echo "Cannot add .nojekyll - reports directory does not exist"
+            exit 1
+          fi
       
       - name: Upload reports as artifacts (for download)
         uses: actions/upload-artifact@v4
