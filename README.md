@@ -154,6 +154,31 @@ The project includes 73 comprehensive tests covering:
 - Advanced analytics
 - Edge cases and error handling
 
+## Automated Report Generation
+
+The project includes GitHub Actions automation to generate reports automatically:
+
+### GitHub Actions Workflow
+
+The workflow (`.github/workflows/generate-reports.yml`) runs:
+- **On push to main branch**: Generates fresh reports for the latest code
+- **Weekly on Sundays**: Keeps reports up-to-date with new match data
+- **Manual trigger**: Can be run on-demand from GitHub Actions tab
+- **Pull requests**: Validates that report generation still works
+
+### GitHub Pages Deployment
+
+Reports are automatically deployed to GitHub Pages when pushed to main branch:
+- **Live reports**: Available at `https://mpuig.github.io/basquet-catala-reports/`
+- **Automatic updates**: New reports deployed on every main branch push
+- **Static hosting**: No server required, fast global CDN delivery
+
+### Artifacts
+
+Generated reports are also stored as GitHub Actions artifacts:
+- **30-day retention**: Download reports directly from workflow runs
+- **Version history**: Previous report versions available for comparison
+
 ## Contributing
 
 This project uses modern Python tooling:
@@ -162,3 +187,4 @@ This project uses modern Python tooling:
 - **pytest** for testing
 - **ruff** for linting
 - **Type hints** throughout the codebase
+- **GitHub Actions** for CI/CD and automated report generation
