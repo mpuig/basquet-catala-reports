@@ -48,6 +48,20 @@ jobs:
         run: |
           uv run run.py --groups 17182 18299 --season 2024
       
+      - name: Verify reports were generated
+        run: |
+          echo "Checking if reports directory exists..."
+          ls -la reports/ || echo "Reports directory not found!"
+          echo "Checking for index.html..."
+          ls -la reports/index.html || echo "index.html not found!"
+          echo "Reports directory structure:"
+          find reports/ -type f -name "*.html" | head -10 || echo "No HTML files found!"
+      
+      - name: Add .nojekyll to reports directory
+        run: |
+          touch reports/.nojekyll
+          echo "Added .nojekyll file to reports directory"
+      
       - name: Upload reports as artifacts (for download)
         uses: actions/upload-artifact@v4
         with:
