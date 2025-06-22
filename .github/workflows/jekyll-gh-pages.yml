@@ -46,7 +46,7 @@ jobs:
       
       - name: Generate basketball reports
         run: |
-          uv run run.py --group_ids 17182 18299 --season 2024
+          uv run run.py --groups 17182 18299 --season 2024
       
       - name: Upload reports as artifacts (for download)
         uses: actions/upload-artifact@v4

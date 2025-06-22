@@ -61,19 +61,14 @@ The project features a **unified `run.py` script** that serves as the single ent
 
 ### Basic Usage
 
-**Generate reports for a specific team in a competition group:**
+**Generate reports for all teams in a competition group:**
 ```bash
-python run.py --group_ids 17182 --season 2024 --team_id 69630
+python run.py --groups 17182 --season 2024
 ```
 
 **Generate reports for all teams in multiple groups:**
 ```bash
-python run.py --group_ids 17182 18299 --season 2024
-```
-
-**Force re-download of all data:**
-```bash
-python run.py --group_ids 17182 --season 2024 --force-download
+python run.py --groups 17182 18299 --season 2024
 ```
 
 ### Command Line Options
@@ -83,12 +78,12 @@ python run.py --help
 ```
 
 Key parameters:
-- `--group_ids`: Competition group IDs (space-separated for multiple)
+- `--groups`: Competition group IDs (space-separated for multiple)
 - `--season`: Season year (e.g., 2024)
-- `--team_id`: Specific team ID to analyze (optional, generates reports for all teams if not specified)
-- `--force-download`: Re-download all data even if it exists
 - `--data-dir`: Directory to store data files (default: ./data)
 - `--output-dir`: Directory to save HTML reports (default: ./reports)
+- `--verbose`: Enable detailed logging output
+- `--match`: Analyze a specific match ID (optional)
 
 ### Output Structure
 
