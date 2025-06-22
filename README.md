@@ -174,6 +174,14 @@ Generated reports are also stored as GitHub Actions artifacts:
 - **30-day retention**: Download reports directly from workflow runs
 - **Version history**: Previous report versions available for comparison
 
+## Documentation
+
+For comprehensive technical documentation, see the [`docs/`](docs/) directory:
+
+- **[docs/USAGE.md](docs/USAGE.md)**: Complete user guide with detailed examples and troubleshooting
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**: Technical architecture and system design
+- **[docs/CONTEXT_MANAGEMENT.md](docs/CONTEXT_MANAGEMENT.md)**: Development context and historical decisions
+
 ## Contributing
 
 This project uses modern Python tooling:
@@ -183,3 +191,5 @@ This project uses modern Python tooling:
 - **ruff** for linting
 - **Type hints** throughout the codebase
 - **GitHub Actions** for CI/CD and automated report generation
+
+For contribution guidelines and development patterns, see [docs/CONTEXT_MANAGEMENT.md](docs/CONTEXT_MANAGEMENT.md).
