@@ -79,7 +79,7 @@ The typical workflow is:
     ```
 *   **Analyze a single match:**
     ```bash
-    python process_data.py --team 69630 --match <match_id> --season 2024 --data-dir ./data --plot-dir ./plots
+    python process_data.py --team 69630 --match <id> --season 2024 --data-dir ./data --plot-dir ./plots
     ```
 *   **Exclude specific players (by UUID) from analysis:**
     ```bash

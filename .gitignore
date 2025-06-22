@@ -5,6 +5,9 @@ build/
 dist/
 wheels/
 *.egg-info
+*.log
+.claude/
+uv.lock
 
 # Virtual environments
 .venv
@@ -12,4 +15,5 @@ wheels/
 data/
 reports/
 plots/
-/reports.bak/
+reports.bak/
+data_test/

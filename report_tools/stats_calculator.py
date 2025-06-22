@@ -1,11 +1,13 @@
 from collections import defaultdict
-from typing import Dict, List, Any, Sequence, Optional, Set
+from typing import Dict, List, Any, Optional, Set
 
 import pandas as pd
 
 from report_tools.logger import logger
-from report_tools.models import PlayerAggregate
-from report_tools.utils import get_absolute_seconds, shorten_name
+
+from report_tools.models.groups import Group
+from report_tools.models.matches import Match, MatchMove, PlayerAggregate
+from report_tools.utils import shorten_name
 
 
 def _match_external_team_id(team_info: dict, target_team_id: str) -> bool:
@@ -25,7 +27,7 @@ class StatsCalculator:
     points_map = {"Cistella de 1": 1, "Cistella de 2": 2, "Cistella de 3": 3}
     foul_keywords = ("Personal", "Tècnica", "Antiesportiva", "Desqualificant")
 
-    def __init__(self, team_id: str):
+    def __init__(self, team_id: int):
         self.team_id = team_id
         self.players: Dict[str, PlayerAggregate] = defaultdict(PlayerAggregate)
         self.pairwise_secs: Dict[str, Dict[str, float]] = defaultdict(
@@ -48,12 +50,7 @@ class StatsCalculator:
     # Public API
     # ==================================================================
 
-    def process(
-        self,
-        schedule: pd.DataFrame,
-        all_moves: Dict[str, Sequence[dict]],
-        all_stats: Dict[str, dict],
-    ) -> None:
+    def process(self, group: Group) -> None:
         """Processes all matches found in the schedule data.
 
         Iterates through the provided schedule, loads corresponding moves and stats
@@ -61,78 +58,16 @@ class StatsCalculator:
         internal helper methods.
 
         Args:
-            schedule: DataFrame containing schedule information (must include 'match_id').
-            all_moves: Dictionary mapping match_id to a list of play-by-play events.
-            all_stats: Dictionary mapping match_id to aggregated match stats JSON data.
+            schedule: DataFrame containing schedule information (must include 'id').
+            all_moves: Dictionary mapping id to a list of play-by-play events.
+            all_stats: Dictionary mapping id to aggregated match stats JSON data.
         """
-        processed_matches = 0
-        skipped_matches_no_moves = 0
-        skipped_matches_no_stats = 0
-        skipped_matches_id_mapping = 0
-
-        for index, row_series in schedule.iterrows():
-            match_id = str(row_series.get("match_id", ""))
-            if not match_id or match_id.lower() == "nan":
-                continue
-
-            events = all_moves.get(match_id)
-            stats_data = all_stats.get(match_id)
-
-            if not events or not stats_data:
-                if not events:
-                    skipped_matches_no_moves += 1
-                if not stats_data:
-                    skipped_matches_no_stats += 1
-                continue
-
-            internal_id, target_team_name = self._get_internal_id_and_name(
-                match_id, stats_data
-            )
-            if internal_id is None:
-                skipped_matches_id_mapping += 1
-                continue  # Mapping failed
-
-            # Process the single game using the mapped internal ID
-            self._process_single_game_events(
-                match_id, events, internal_id, target_team_name
-            )
-            processed_matches += 1
-
-    # ==================================================================
-    # Internal Processing Logic - Single Game
-    # ==================================================================
-
-    def _get_internal_id_and_name(
-        self, match_id: str, stats_data: dict
-    ) -> tuple[Optional[int], Optional[str]]:
-        """Finds the internal ID and name for the target team using match_stats data."""
-        target_team_schedule_id: str = self.team_id
-        match_stats_teams: list = stats_data.get("teams", [])
-        internal_id: Optional[int] = None
-        team_name: str = "Unknown"
-
-        for team_info in match_stats_teams:
-            if _match_external_team_id(team_info, target_team_schedule_id):
-                internal_id = team_info.get("teamIdIntern")
-                team_name = team_info.get("name", team_name)
-                break
-
-        if internal_id is None:
-            logger.debug(
-                "Skipping match %s for schedule team ID %s – Cannot map to internal idTeam using match_stats data.",
-                match_id,
-                target_team_schedule_id,
-            )
-            return None, None
-
-        return internal_id, team_name
+        for match in group.matches:
+            self._process_single_game_events(match)
 
     def _process_single_game_events(
         self,
-        match_id: str,
-        events: Sequence[dict],
-        internal_id: int,  # Target team's internal ID for this match
-        target_team_name: str,  # Target team's name for this match
+        match: Match,
     ) -> None:
         """Core loop through events for a single game, updating state and stats."""
         # ---- Per-game accumulators and state ----
@@ -146,28 +81,21 @@ class StatsCalculator:
         last_event_abs_seconds = 0.0
         game_end_sec = 0.0
 
-        for event in events:
-            event_time_info = {
-                "period": event.get("period", 0),
-                "minute": event.get("min", 0),
-                "second": event.get("sec", 0),
-            }
-            event_abs_seconds = get_absolute_seconds(**event_time_info)
+        for event in match.moves:
+            event_abs_seconds = event.get_absolute_seconds()
             delta_secs = event_abs_seconds - last_event_abs_seconds
 
-            actor_name = event.get("actorName", "")
-            event_team_id = event.get("idTeam")
-            is_target_team_event = event_team_id == internal_id
+            is_local_team = event.id_team == match.local.id
 
             # 1. Update On/Off and Lineup time metrics based on elapsed time
             current_lineup_tuple = self._update_time_metrics(delta_secs, on_court)
 
             # 2. Handle scoring events
-            pts = self.points_map.get(event.get("move", ""), 0)
+            pts = self.points_map.get(event.move, 0)
             if pts > 0:
                 game_opponent_pts = self._handle_score(
                     pts,
-                    is_target_team_event,
+                    is_local_team,
                     on_court,
                     per_game_plusminus,
                     per_game_on_pts_a,
@@ -179,17 +107,14 @@ class StatsCalculator:
             last_event_abs_seconds = event_abs_seconds
             game_end_sec = max(game_end_sec, event_abs_seconds)
 
-            # 4. Handle player-specific events (stats, substitutions)
-            if is_target_team_event and actor_name and actor_name != target_team_name:
-                self._handle_player_event(
-                    event,
-                    actor_name,
-                    event_abs_seconds,
-                    player_state,
-                    on_court,
-                    per_game_minutes,
-                    per_game_points,
-                )
+            self._handle_player_event(
+                event,
+                event_abs_seconds,
+                player_state,
+                on_court,
+                per_game_minutes,
+                per_game_points,
+            )
 
         # --- End of Game Processing ---
         self._finalize_game_metrics(
@@ -202,7 +127,7 @@ class StatsCalculator:
             per_game_plusminus,
             per_game_on_pts_a,
             game_opponent_pts,
-            match_id,
+            match.id,
         )
 
     def _update_time_metrics(
@@ -223,7 +148,7 @@ class StatsCalculator:
     def _handle_score(
         self,
         pts: int,
-        is_target_team_event: bool,
+        is_local_team: bool,
         on_court: Set[str],
         per_game_plusminus: Dict[str, int],
         per_game_on_pts_a: Dict[str, int],
@@ -231,12 +156,12 @@ class StatsCalculator:
         game_opponent_pts: int,
     ) -> int:
         """Updates plus/minus, on/off points, lineup points, and opponent points for a scoring event."""
-        point_diff = pts if is_target_team_event else -pts
+        point_diff = pts if is_local_team else -pts
         for p in on_court:
             self.plus_minus[p] += point_diff
             per_game_plusminus[p] += point_diff
 
-        if is_target_team_event:
+        if is_local_team:
             self.team_pts_f += pts
             for p in on_court:
                 self.on_pts_f[p] += pts
@@ -249,7 +174,7 @@ class StatsCalculator:
 
         if current_lineup_tuple:
             lu_stats = self.lineup_stats[current_lineup_tuple]
-            if is_target_team_event:
+            if is_local_team:
                 lu_stats["pts_for"] = lu_stats.get("pts_for", 0) + pts
             else:
                 lu_stats["pts_against"] = lu_stats.get("pts_against", 0) + pts
@@ -258,8 +183,7 @@ class StatsCalculator:
 
     def _handle_player_event(
         self,
-        event: dict,
-        actor_name: str,
+        event: MatchMove,
         event_abs_seconds: float,
         player_state: Dict[
             str, Dict
@@ -269,42 +193,41 @@ class StatsCalculator:
         per_game_points: Dict[str, int],
     ) -> None:
         """Handles player-specific stats (points, fouls) and substitutions."""
-        event_type = event.get("move", "")
-        period = event.get("period", 0)
-        minute = event.get("min", 0)
-        second = event.get("sec", 0)
-        actor_num = event.get("actorShirtNumber")
+        event_type = event.move
 
-        # Ensure player is tracked in the main aggregate (self.players)
-        if actor_name not in self.players:
-            self.players[actor_name] = PlayerAggregate(
-                number=actor_num, name=actor_name
+        if event.actor_name not in self.players:
+            self.players[event.actor_name] = PlayerAggregate(
+                number=str(event.actor_shirt_number), name=event.actor_name
             )
-        elif self.players[actor_name].number is None and actor_num is not None:
-            self.players[actor_name].number = actor_num
+        elif (
+            self.players[event.actor_name].number is None
+            and event.actor_shirt_number is not None
+        ):
+            self.players[event.actor_name].number = str(event.actor_shirt_number)
 
-        pa = self.players[actor_name]
+        pa = self.players[event.actor_name]
 
         # Player state for the current game:
         # 'setdefault' initializes with 'since: 0.0'. This is crucial for correctly
         # identifying game starters if their first event isn't "Entra al camp".
         st = player_state.setdefault(
-            actor_name, {"status": "out", "since": 0.0, "number": actor_num}
+            event.actor_name,
+            {"status": "out", "since": 0.0, "number": event.actor_shirt_number},
         )
 
         # --- Handle Player Stats (Points, Fouls) ---
         if event_type in ["Cistella de 3", "Triple"]:
             pa.t3 += 1
             pa.pts += 3
-            per_game_points[actor_name] += 3
+            per_game_points[event.actor_name] += 3
         elif event_type in ["Cistella de 2", "Esmaixada"]:
             pa.t2 += 1
             pa.pts += 2
-            per_game_points[actor_name] += 2
+            per_game_points[event.actor_name] += 2
         elif event_type == "Cistella de 1":
             pa.t1 += 1
             pa.pts += 1
-            per_game_points[actor_name] += 1
+            per_game_points[event.actor_name] += 1
         elif event_type.startswith(
             self.foul_keywords
         ):  # Use class attribute foul_keywords
@@ -314,16 +237,16 @@ class StatsCalculator:
         if event_type == "Entra al camp":
             # Player is explicitly entering. Mark as 'in' from this event's time.
             if st["status"] == "out":  # Standard case: player was out, now in.
-                if actor_name not in on_court:
-                    on_court.add(actor_name)
+                if event.actor_name not in on_court:
+                    on_court.add(event.actor_name)
             elif (
                 st["status"] == "in"
             ):  # Already 'in', possibly redundant event or error in data.
                 logger.debug(
-                    f"Player {actor_name} ({st.get('number')}) 'Entra al camp' at P{period} {minute:02d}:{second:02d} but status already 'in'. 'since' will be updated."
+                    f"Player {event.actor_name} ({st.get('number')}) 'Entra al camp' at P{event.period} {event.min:02d}:{event.sec:02d} but status already 'in'. 'since' will be updated."
                 )
-                if actor_name not in on_court:  # Ensure consistency
-                    on_court.add(actor_name)
+                if event.actor_name not in on_court:  # Ensure consistency
+                    on_court.add(event.actor_name)
 
             st["status"] = "in"
             st["since"] = (
@@ -343,7 +266,7 @@ class StatsCalculator:
                     duration_to_credit = event_abs_seconds - entry_time_for_stint
                 else:  # e.g. Surt event at same time as Entra, or data issue
                     logger.warning(
-                        f"Player {actor_name} ({st.get('number')}) 'Surt del camp' (status 'in') at P{period} {minute:02d}:{second:02d} (abs: {event_abs_seconds:.0f}), "
+                        f"Player {event.actor_name} ({st.get('number')}) 'Surt del camp' (status 'in') at P{event.period} {event.min:02d}:{event.sec:02d} (abs: {event_abs_seconds:.0f}), "
                         f"but 'since' ({entry_time_for_stint:.2f}s) not validly before. Duration 0."
                     )
             elif (
@@ -354,26 +277,26 @@ class StatsCalculator:
                 if entry_time_for_stint < event_abs_seconds:
                     duration_to_credit = event_abs_seconds - entry_time_for_stint
                     logger.info(  # Info log to confirm time is being credited for this scenario
-                        f"Player {actor_name} ({st.get('number')}) 'Surt del camp' at P{period} {minute:02d}:{second:02d} (abs: {event_abs_seconds:.0f}) "
+                        f"Player {event.actor_name} ({st.get('number')}) 'Surt del camp' at P{event.period} {event.min:02d}:{event.sec:02d} (abs: {event_abs_seconds:.0f}) "
                         f"but status was 'out'. Using 'since'={entry_time_for_stint:.0f}s as entry. Duration: {duration_to_credit:.0f}s."
                     )
                 else:  # This case (since >= event_abs_seconds when status 'out') should be rarer now
                     logger.warning(
-                        f"Player {actor_name} ({st.get('number')}) 'Surt del camp' (status 'out') at P{period} {minute:02d}:{second:02d} (abs: {event_abs_seconds:.0f}), "
+                        f"Player {event.actor_name} ({st.get('number')}) 'Surt del camp' (status 'out') at P{event.period} {event.min:02d}:{event.sec:02d} (abs: {event_abs_seconds:.0f}), "
                         f"but 'since' ({entry_time_for_stint:.2f}s) not validly before event time. No time credited for this exit."
                     )
 
             if duration_to_credit > 0:
-                self._credit_minutes(actor_name, duration_to_credit)
-                per_game_minutes[actor_name] += duration_to_credit
-                if actor_name in on_court:  # Player was on court
+                self._credit_minutes(event.actor_name, duration_to_credit)
+                per_game_minutes[event.actor_name] += duration_to_credit
+                if event.actor_name in on_court:  # Player was on court
                     on_court.remove(
-                        actor_name
+                        event.actor_name
                     )  # Remove after crediting time for the stint
                     # Credit pairwise for the duration they played with others who are still on court
                     for other_player in list(on_court):
                         self._credit_pairwise_secs(
-                            actor_name, other_player, duration_to_credit
+                            event.actor_name, other_player, duration_to_credit
                         )
                 # If status was 'out' but duration_to_credit > 0, they were implicitly on court.
                 # on_court set might be out of sync if their 'Entra' was missed.
@@ -396,8 +319,8 @@ class StatsCalculator:
             if st["since"] != 0.0:
                 st["since"] = event_abs_seconds
 
-            if actor_name not in on_court:
-                on_court.add(actor_name)
+            if event.actor_name not in on_court:
+                on_court.add(event.actor_name)
 
     def _finalize_game_metrics(
         self,
@@ -480,7 +403,7 @@ class StatsCalculator:
         df = pd.DataFrame(filtered_log)
         if df.empty:
             return df
-        df['game_idx'] = df.groupby('player').cumcount() + 1
+        df["game_idx"] = df.groupby("player").cumcount() + 1
         df.sort_values("game_idx", inplace=True)
         df["roll_pts"] = df.groupby("player")["pts"].transform(
             lambda s: s.rolling(3, 1).mean()

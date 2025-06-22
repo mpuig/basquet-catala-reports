@@ -1,12 +1,15 @@
 """Test fixtures for basketball reports."""
 
 import json
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
-import pytest
 import pandas as pd
+import pytest
 
+from report_tools.models.matches import Match, MatchMove, MoveType, MatchStats
+from report_tools.models.teams import Team
 
 
 def _create_temp_file(
@@ -31,6 +34,46 @@ def _create_temp_file(
         json.dump(data, f, ensure_ascii=False)
 
     return tmp_path, filename.split(".")[0]
+
+
+@pytest.fixture
+def sample_team():
+    """Fixture providing a sample team."""
+    return Team(id=1, name="Team A", short_name="TA")
+
+
+@pytest.fixture
+def sample_match(sample_team):
+    """Fixture providing a sample match."""
+    return Match(
+        id="123",
+        match_date="2024-03-14",
+        group_name="Group 1",
+        local=sample_team,
+        visitor=Team(id=2, name="Team B", short_name="TB"),
+        score="80-75",
+        moves=[],
+    )
+
+
+@pytest.fixture
+def sample_move():
+    """Fixture providing a sample move event."""
+    return MatchMove(
+        id_team=1,
+        actor_name="John Doe",
+        actor_id=101,
+        actor_shirt_number="10",
+        id_move=1,
+        move=MoveType.TWO_POINT_MADE,
+        min=5,
+        sec=30,
+        period=1,
+        score="2-0",
+        team_action=True,
+        event_uuid="abc123",
+        timestamp=datetime.now(),
+    )
 
 
 @pytest.fixture
@@ -59,9 +102,9 @@ def match_stats_data() -> Dict[str, Dict[str, int]]:
                 "visit": 0,
                 "minuteQuarter": 0,
                 "minuteAbsolute": 0,
-                "period": 1
+                "period": 1,
             }
-        ]
+        ],
     }
 
 
@@ -217,20 +260,78 @@ def dummy_match_stats_file(tmp_path, match_stats_data):
 
 
 @pytest.fixture
-def fixture_match_stats_file(tmp_path):
-    """Create a temporary match stats file from the fixture data."""
-    match_id = "158215"  # Using the idMatchIntern from the fixture
-    stats_dir = tmp_path / "match_stats"
-    stats_dir.mkdir()
-    file_path = stats_dir / f"{match_id}.json"
+def match_stats_fixture_file(
+    tmp_path: Path, match_id: Optional[str] = None
+) -> Tuple[Path, str]:
+    """Create a temporary match stats file from the fixture data.
+
+    Args:
+        tmp_path: Base temporary directory
+        match_id: Optional match ID to use. If not provided, uses the fixture's match ID.
+
+    Returns:
+        Tuple of (base_path, match_id)
+    """
+    match_id = match_id or "158215"  # Using the idMatchIntern from the fixture
 
     # Read the fixture file
     fixture_path = Path(__file__).parent / "fixtures" / "match_stats.json"
+    if not fixture_path.exists():
+        raise FileNotFoundError(f"Fixture file not found: {fixture_path}")
+
     with open(fixture_path, "r", encoding="utf-8") as f:
-        fixture_data = json.load(f)
+        stats_data = json.load(f)
 
-    # Write the stats to the temporary file
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(fixture_data, f)
+    return _create_temp_file(tmp_path, "match_stats", f"{match_id}.json", stats_data)
 
-    return tmp_path, match_id
+
+@pytest.fixture
+def match_moves_fixture_file(
+    tmp_path: Path, match_id: Optional[str] = None
+) -> Tuple[Path, str]:
+    """Create a temporary match moves file from the fixture data.
+
+    Args:
+        tmp_path: Base temporary directory
+        match_id: Optional match ID to use. If not provided, uses the fixture's match ID.
+
+    Returns:
+        Tuple of (base_path, match_id)
+    """
+    match_id = match_id or "158215"  # Using the idMatchIntern from the fixture
+
+    # Read the fixture file
+    fixture_path = Path(__file__).parent / "fixtures" / "match_moves.json"
+    if not fixture_path.exists():
+        raise FileNotFoundError(f"Fixture file not found: {fixture_path}")
+
+    with open(fixture_path, "r", encoding="utf-8") as f:
+        moves_data = json.load(f)
+
+    return _create_temp_file(tmp_path, "match_moves", f"{match_id}.json", moves_data)
+
+
+@pytest.fixture
+def advanced_stats_match_stats(
+    match_stats_fixture_file: Tuple[Path, str],
+) -> MatchStats:
+    """Load match stats from fixture file for advanced stats testing."""
+    base_path, match_id = match_stats_fixture_file
+    file_path = base_path / "match_stats" / f"{match_id}.json"
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return MatchStats(**data)
+
+
+@pytest.fixture
+def advanced_stats_match_moves(
+    match_moves_fixture_file: Tuple[Path, str],
+) -> List[MatchMove]:
+    """Load match moves from fixture file for advanced stats testing."""
+    base_path, match_id = match_moves_fixture_file
+    file_path = base_path / "match_moves" / f"{match_id}.json"
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return [MatchMove(**move) for move in data]

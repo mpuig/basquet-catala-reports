@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from report_tools.data_loaders import load_match_moves
-from report_tools.models.matches import MatchMove
+from report_tools.models.matches import MatchMove, MoveType
 
 
 def test_load_match_moves_success(match_moves_file):
@@ -17,9 +17,9 @@ def test_load_match_moves_success(match_moves_file):
     assert move1.id_team == 1
     assert move1.actor_name == "John Doe"
     assert move1.actor_id == 123
-    assert move1.actor_shirt_number == "10"
+    assert move1.actor_shirt_number == 10
     assert move1.id_move == 1
-    assert move1.move == "Cistella de 2"
+    assert move1.move == MoveType.TWO_POINT_MADE
     assert move1.min == 5
     assert move1.sec == 30
     assert move1.period == 1
@@ -35,9 +35,9 @@ def test_load_match_moves_success(match_moves_file):
     assert move2.id_team == 2
     assert move2.actor_name == "Jane Smith"
     assert move2.actor_id == 456
-    assert move2.actor_shirt_number == "15"
+    assert move2.actor_shirt_number == 15
     assert move2.id_move == 2
-    assert move2.move == "Cistella de 3"
+    assert move2.move == MoveType.THREE_POINT_MADE
     assert move2.min == 6
     assert move2.sec == 15
     assert move2.period == 1
@@ -72,14 +72,14 @@ def test_load_match_moves_invalid_json(tmp_path):
 
 
 def test_match_move_get_absolute_seconds():
-    """Test the get_absolute_seconds method of MatchMove."""
+    """Test the get_absolute_seconds method of MatchMove (elapsed time from start of match)."""
     move = MatchMove(
         id_team=1,
         actor_name="Test Player",
         actor_id=123,
         actor_shirt_number="10",
         id_move=1,
-        move="Cistella de 2",
+        move=MoveType.TWO_POINT_MADE,
         min=5,
         sec=30,
         period=1,
@@ -89,7 +89,10 @@ def test_match_move_get_absolute_seconds():
     )
 
     # For period 1, min 5, sec 30, with PERIOD_LENGTH_SEC = 600 (10 minutes)
-    # Expected: (1-1) * 600 + (600 - (5 * 60 + 30)) = 0 + (600 - 330) = 270
+    # In basketball, the clock counts DOWN. min=5, sec=30 means 5:30 remaining
+    # Elapsed time = 600 - (5*60 + 30) = 600 - 330 = 270 seconds
+    # Plus elapsed from prior periods: (1-1) * 600 = 0
+    # Total: 0 + 270 = 270
     assert move.get_absolute_seconds() == 270
 
 
@@ -105,11 +108,11 @@ def test_load_match_moves_from_fixture(fixture_match_moves_file):
     # Test first move from fixture
     move1 = moves[0]
     assert move1.id_team == 319131
-    assert move1.actor_name == "LAURA ULLATE ALVAREZ"
+    assert move1.actor_name == "SARA CASTILLO HERRERA"
     assert move1.actor_id == 4966665
-    assert move1.actor_shirt_number == "28"
+    assert move1.actor_shirt_number == 28
     assert move1.id_move == 178
-    assert move1.move == "Salt guanyat"
+    assert move1.move == MoveType.JUMP_BALL_WON
     assert move1.min == 10
     assert move1.sec == 0
     assert move1.period == 1
@@ -129,11 +132,11 @@ def test_fixture_match_moves_sequence(fixture_match_moves_file):
     assert len(moves) > 0
 
     # Test first few moves in sequence
-    assert moves[0].move == "Salt guanyat"
-    assert moves[1].move == "Salt perdut"
-    assert moves[2].move == "Personal 2 tirs lliures, 1a falta"
-    assert moves[3].move == "Cistella de 1"
-    assert moves[4].move == "Cistella de 1"
+    assert moves[0].move == MoveType.JUMP_BALL_WON
+    assert moves[1].move == MoveType.JUMP_BALL_LOST
+    assert moves[2].move == MoveType.PERSONAL_FOUL_TWO_FREE_THROWS_FIRST
+    assert moves[3].move == MoveType.FREE_THROW_MADE
+    assert moves[4].move == MoveType.FREE_THROW_MADE
 
     # Test score progression
     assert moves[0].score == "0-0"
@@ -161,8 +164,8 @@ def test_fixture_match_moves_teams(fixture_match_moves_file):
         for move in team_0_moves:
             # These moves should be special game events like period endings
             assert move.move in [
-                "Final de període",
-                "Timeout",
+                MoveType.PERIOD_END,
+                MoveType.TIMEOUT,
             ]  # Add other special moves if needed
             # Special events can be team actions (e.g., period endings affect both teams)
             # or individual actions (e.g., technical fouls)

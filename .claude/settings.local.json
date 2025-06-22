@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m pytest tests/ -v)",
+      "Bash(source:*)",
+      "Bash(python:*)",
+      "Bash(ruff check:*)",
+      "Bash(rg:*)",
+      "Bash(grep:*)",
+      "Bash(timeout 60 python:*)",
+      "Bash(uv add:*)",
+      "Bash(uv run:*)",
+      "Bash(uv:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(rm:*)"
+    ],
+    "deny": []
+  }
+}

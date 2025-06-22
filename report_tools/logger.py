@@ -2,9 +2,11 @@ import logging
 import sys
 
 logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(levelname)s | %(name)s | %(asctime)s | %(message)s",
-    stream=sys.stderr,
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("run2.log", mode="a"),
+    ],
 )
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
-logger = logging.getLogger("match_report_generator")
+logger = logging.getLogger("report_generator")
